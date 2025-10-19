@@ -1,0 +1,3 @@
+### cURL test for your deployed Render service
+# Replace <your-render-subdomain> with your actual domain
+curl -X POST https://<your-render-subdomain>.onrender.com/webhook          -H "Content-Type: application/json"          -d '{"symbol":"SPY","side":"buy","qty":1}'

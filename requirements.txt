@@ -1,0 +1,5 @@
+flask
+requests
+alpaca-trade-api
+# Optional (production server). If you switch your Procfile to gunicorn, keep this line:
+gunicorn
