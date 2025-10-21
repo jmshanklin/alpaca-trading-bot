@@ -1,5 +1,4 @@
-flask
-requests
-alpaca-trade-api
-# Optional (production server). If you switch your Procfile to gunicorn, keep this line:
-gunicorn
+Flask==3.0.0
+requests==2.31.0
+alpaca-trade-api==3.1.1
+gunicorn==21.2.0
