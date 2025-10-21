@@ -54,6 +54,17 @@ def ping():
 def webhook():
     req_id = str(uuid.uuid4())[:8]
     data = request.get_json(silent=True) or {}
+    # ======================================================
+# Optional: dry-run (safe test mode for TradingView)
+# Example usage: https://your-service.onrender.com/webhook?dry_run=1
+# ======================================================
+if request.args.get("dry_run") == "1":
+    log("tv_dry_run_received", data=data)
+    return jsonify({
+        "status": "ok",
+        "dry_run": True,
+        "received": data
+    }), 200
 
     # Identify source (TradingView vs curl vs unknown)
     user_agent = request.headers.get("User-Agent", "unknown")
