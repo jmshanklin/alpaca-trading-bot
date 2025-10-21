@@ -45,14 +45,19 @@ def webhook():
     req_id = str(uuid.uuid4())[:8]
     data = request.get_json(silent=True) or {}
 
-    # never log the secret key
+    # Identify source (TradingView vs curl vs unknown)
+    user_agent = request.headers.get("User-Agent", "unknown")
+    ua = user_agent.lower()
+    source = "TradingView" if "tradingview" in ua else ("curl" if "curl" in ua else "unknown")
+
+    # Never log the secret key
     safe = {k: ("***" if k == "key" else v) for k, v in data.items()}
-    log("received", req_id=req_id, **safe)
+    log("received", req_id=req_id, source=source, **safe)
 
     # --- simple auth (optional) ---
     if WEBHOOK_KEY:
         provided = data.get("key", "")
-        # constant-time compare to avoid leaking info
+        # timing-safe compare (and don't leak type errors)
         if not (isinstance(provided, str) and hmac.compare_digest(provided, WEBHOOK_KEY)):
             log("unauthorized", level="warning", req_id=req_id)
             return jsonify({"status": "error", "message": "unauthorized"}), 401
