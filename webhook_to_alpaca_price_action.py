@@ -39,6 +39,16 @@ app = Flask(__name__)
 def health():
     return jsonify({"status": "ok", "service": "TradingBot", "endpoints": ["/webhook"]})
 
+# ---------- Version / Ping ----------
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({
+        "status": "ok",
+        "service": "TradingBot",
+        "version": "1.0.0",
+        "message": "Bot is alive and responding 🚀"
+    })
+
 # ---------- Webhook ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
