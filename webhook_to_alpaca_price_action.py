@@ -60,11 +60,7 @@ def webhook():
 # ======================================================
 if request.args.get("dry_run") == "1":
     log("tv_dry_run_received", data=data)
-    return jsonify({
-        "status": "ok",
-        "dry_run": True,
-        "received": data
-    }), 200
+    return jsonify({"status": "ok", "dry_run": True, "received": data}), 200
 
     # Identify source (TradingView vs curl vs unknown)
     user_agent = request.headers.get("User-Agent", "unknown")
