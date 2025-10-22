@@ -1,7 +1,26 @@
+# webhook_to_alpaca_price_action.py
+# --------------------------------------------------------------------
+# TradingBot webhook for Alpaca (Render + Flask, Python 3.11+)
+#
+# Expected JSON from TradingView (example):
+# {
+#   "symbol": "TSLA",         # default if omitted: "TSLA"
+#   "side":   "buy",          # "buy" | "sell" | "close"
+#   "qty":    1,              # required for buy/sell; ignored for close
+#   "time_in_force": "day",   # optional; default "day"
+#   "client_id": "optional-id", # optional idempotency key
+#   "key": "<your WEBHOOK_KEY>" # optional if you set WEBHOOK_KEY in Render
+# }
+# --------------------------------------------------------------------
+
 from flask import Flask, request, jsonify
-import os, uuid, hmac, logging
+import os
+import uuid
+import hmac
+import logging
 from datetime import datetime
 import alpaca_trade_api as tradeapi
+
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -10,16 +29,28 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-def log(message, level="info", **fields):
+def log(message: str, level: str = "info", **fields):
+    """Human-friendly structured logger that masks sensitive values."""
+    # mask obvious secret-ish keys
+    masked = {}
+    for k, v in fields.items():
+        if k.lower() in {"key", "webhook_key", "apca_api_secret_key", "alpaca_secret_key"}:
+            masked[k] = "***"
+        else:
+            masked[k] = v
+
     trailer = ""
-    if fields:
-        trailer = " | " + ", ".join(f"{k}={v}" for k, v in fields.items())
+    if masked:
+        kv = ", ".join(f"{k}={v}" for k, v in masked.items())
+        trailer = f" | {kv}"
+
     msg = f"{message}{trailer}"
     lvl = level.lower()
-    getattr(logging, "warning" if lvl == "warning" else "error" if lvl == "error" else "info")(msg)
+    getattr(logging, "warning" if lvl == "warning" else ("error" if lvl == "error" else "info"))(msg)
+
 
 # ---------- Config (env vars on Render) ----------
-ALPACA_KEY_ID     = os.getenv("ALPACA_KEY_ID")     or os.getenv("APCA_API_KEY_ID")
+ALPACA_KEY_ID     = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
 ALPACA_BASE_URL   = (
     os.getenv("ALPACA_BASE_URL")
@@ -27,17 +58,14 @@ ALPACA_BASE_URL   = (
     or "https://paper-api.alpaca.markets"
 )
 
-WEBHOOK_KEY = os.getenv("WEBHOOK_KEY", "")  # set in Render → Environment
+# Optional: simple auth for webhooks
+WEBHOOK_KEY = os.getenv("WEBHOOK_KEY", "")
 
 # ---------- Alpaca client ----------
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
 app = Flask(__name__)
 
-# ---------- Health ----------
-@app.route("/", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "service": "TradingBot", "endpoints": ["/webhook"]})
 
 # ---------- Version / Ping ----------
 @app.route("/ping", methods=["GET"])
@@ -46,43 +74,49 @@ def ping():
         "status": "ok",
         "service": "TradingBot",
         "version": "1.0.0",
-        "message": "Bot is alive and responding 🚀"
-    })
+        "message": "Bot is alive and responding 🚀",
+    }), 200
+
+
+# ---------- Root health (browser-friendly) ----------
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "service": "TradingBot",
+        "endpoints": ["/webhook", "/ping"],
+    }), 200
+
 
 # ---------- Webhook ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    """
+    Accepts TradingView JSON and places a market order or closes a position.
+    Returns 200 with JSON on both success and handled errors (so TV doesn't retry forever).
+    """
     req_id = str(uuid.uuid4())[:8]
     data = request.get_json(silent=True) or {}
-    # ======================================================
-# Optional: dry-run (safe test mode for TradingView)
-# Example usage: https://your-service.onrender.com/webhook?dry_run=1
-# ======================================================
-if request.args.get("dry_run") == "1":
-    log("tv_dry_run_received", data=data)
-    return jsonify({"status": "ok", "dry_run": True, "received": data}), 200
 
-    # Identify source (TradingView vs curl vs unknown)
-    user_agent = request.headers.get("User-Agent", "unknown")
-    ua = user_agent.lower()
-    source = "TradingView" if "tradingview" in ua else ("curl" if "curl" in ua else "unknown")
+    # Identify source for logs
+    ua = request.headers.get("User-Agent", "unknown")
+    src = "TradingView" if "tradingview" in ua.lower() else ("curl" if "curl" in ua.lower() else "unknown")
 
-    # Never log the secret key
-    safe = {k: ("***" if k == "key" else v) for k, v in data.items()}
-    log("received", req_id=req_id, source=source, **safe)
+    # Log receipt (masking "key")
+    safe = {k: ("***" if k.lower() == "key" else v) for k, v in data.items()}
+    log("received", req_id=req_id, source=src, **safe)
 
     # --- simple auth (optional) ---
     if WEBHOOK_KEY:
-        provided = data.get("key", "")
-        # timing-safe compare (and don't leak type errors)
-        if not (isinstance(provided, str) and hmac.compare_digest(provided, WEBHOOK_KEY)):
+        provided = str(data.get("key", ""))
+        if not (isinstance(provided, str) and hmac.compare_digest(provided, str(WEBHOOK_KEY))):
             log("unauthorized", level="warning", req_id=req_id)
             return jsonify({"status": "error", "message": "unauthorized"}), 401
 
     # --- validate payload ---
-    symbol = (data.get("symbol") or "SPY").upper().strip()
+    symbol = (data.get("symbol") or "TSLA").upper().strip()
     side   = (data.get("side") or "buy").lower().strip()
-    tif    = data.get("time_in_force", "day")
+    tif    = (data.get("time_in_force") or "day").lower().strip()
 
     if side not in {"buy", "sell", "close"}:
         return jsonify({"status": "error", "message": "side must be buy/sell/close"}), 400
@@ -97,14 +131,19 @@ if request.args.get("dry_run") == "1":
             return jsonify({"status": "error", "message": "qty must be integer"}), 400
 
     # --- idempotency (dedupe) ---
-    client_id = data.get("client_id") or f"{symbol}-{side}-{data.get('qty',1)}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    client_id = (
+        data.get("client_id")
+        or f"{symbol}-{side}-{data.get('qty', 1)}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    )
 
     try:
+        # Close = reduce-only (Alpaca closes open position entirely)
         if side == "close":
             api.close_position(symbol)
             log("close_position", req_id=req_id, symbol=symbol)
-            return jsonify({"status": "success", "action": "close", "symbol": symbol})
+            return jsonify({"status": "success", "action": "close", "symbol": symbol}), 200
 
+        # Place market order
         order = api.submit_order(
             symbol=symbol,
             qty=qty,
@@ -114,15 +153,14 @@ if request.args.get("dry_run") == "1":
             client_order_id=client_id,
         )
         log("order_submitted", req_id=req_id, id=order.id, symbol=symbol, side=side, qty=qty)
-        return jsonify({"status": "success", "order_id": order.id, "client_id": client_id})
+        return jsonify({"status": "success", "order_id": order.id, "client_id": client_id}), 200
 
     except Exception as e:
-        # keep HTTP 200 so external senders don't retry forever; switch to 400 if you prefer retries
+        # Keep HTTP 200 so TradingView doesn't retry forever (switch to 400 if you want retries).
         msg = str(e)
         log("order_error", level="error", req_id=req_id, error=msg)
         return jsonify({"status": "error", "message": msg}), 200
 
-# No app.run() here — Render starts it with Gunicorn
-# Start command on Render:
-# gunicorn -w 2 -k gthread -b 0.0.0.0:$PORT webhook_to_alpaca_price_action:app
 
+# No app.run() here — Render starts this with Gunicorn:
+# gunicorn -w 2 -k gthread -b 0.0.0.0:$PORT webhook_to_alpaca_price_action:app
