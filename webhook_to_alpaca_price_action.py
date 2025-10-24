@@ -147,9 +147,7 @@ def webhook():
                 return jsonify({"status": "error", "message": "qty must be > 0"}), 400
         except Exception:
             return jsonify({"status": "error", "message": "qty must be integer"}), 400
-            
-    
-           
+                   
     # --- idempotency (dedupe) ---
     client_id = (
         data.get("client_id")
