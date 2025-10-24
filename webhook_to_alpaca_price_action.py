@@ -21,7 +21,6 @@ import logging
 from datetime import datetime
 import alpaca_trade_api as tradeapi
 
-
 # ---------- Logging ----------
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -48,7 +47,6 @@ def log(message: str, level: str = "info", **fields):
     lvl = level.lower()
     getattr(logging, "warning" if lvl == "warning" else ("error" if lvl == "error" else "info"))(msg)
 
-
 # ---------- Config (env vars on Render) ----------
 ALPACA_KEY_ID     = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
@@ -66,7 +64,6 @@ api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
 app = Flask(__name__)
 
-
 # ---------- Version / Ping ----------
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -77,7 +74,6 @@ def ping():
         "message": "Bot is alive and responding 🚀",
     }), 200
 
-
 # ---------- Root health (browser-friendly) ----------
 @app.route("/", methods=["GET"])
 def health():
@@ -86,7 +82,6 @@ def health():
         "service": "TradingBot",
         "endpoints": ["/webhook", "/ping"],
     }), 200
-
 
 # ---------- Webhook ----------
 @app.route("/webhook", methods=["POST"])
@@ -106,12 +101,18 @@ def webhook():
     safe = {k: ("***" if k.lower() == "key" else v) for k, v in data.items()}
     log("received", req_id=req_id, source=src, **safe)
 
-    # --- simple auth (optional) ---
+    # --- simple auth (accept key via query (?key=/ ?token=) or JSON ("key"/"secret")) ---
     if WEBHOOK_KEY:
-        provided = str(data.get("key", ""))
-        if not (isinstance(provided, str) and hmac.compare_digest(provided, str(WEBHOOK_KEY))):
-            log("unauthorized", level="warning", req_id=req_id)
-            return jsonify({"status": "error", "message": "unauthorized"}), 401
+        provided = (
+            request.args.get("key")
+            or request.args.get("token")
+            or (data.get("key") if isinstance(data, dict) else None)
+            or (data.get("secret") if isinstance(data, dict) else None)
+            or ""
+    )
+    if not hmac.compare_digest(str(provided), str(WEBHOOK_KEY)):
+        log("unauthorized", level="warning", req_id=req_id)
+        return jsonify({"status": "error", "message": "unauthorized"}), 401
 
     # --- validate payload ---
     symbol = (data.get("symbol") or "TSLA").upper().strip()
@@ -129,7 +130,24 @@ def webhook():
                 return jsonify({"status": "error", "message": "qty must be > 0"}), 400
         except Exception:
             return jsonify({"status": "error", "message": "qty must be integer"}), 400
-
+            
+    # Quick server→Alpaca test: POST /selftest?token=let_me_in
+    SELFTEST_TOKEN = os.getenv("SELFTEST_TOKEN", "let_me_in")
+    
+    @app.route("/selftest", methods=["POST"])
+    def selftest():
+        if request.args.get("token") != SELFTEST_TOKEN:
+            return jsonify({"ok": False, "error": "forbidden"}), 403
+        try:
+            order = api.submit_order(
+                symbol="AAPL", qty=1, side="buy", type="market", time_in_force="day"
+            )
+            log("selftest_order", id=order.id, symbol="AAPL", side="buy", qty=1)
+            return jsonify({"ok": True, "order_id": order.id}), 200
+        except Exception as e:
+            log("selftest_error", level="error", error=str(e))
+            return jsonify({"ok": False, "error": str(e)}), 500
+           
     # --- idempotency (dedupe) ---
     client_id = (
         data.get("client_id")
@@ -160,7 +178,6 @@ def webhook():
         msg = str(e)
         log("order_error", level="error", req_id=req_id, error=msg)
         return jsonify({"status": "error", "message": msg}), 200
-
 
 # No app.run() here — Render starts this with Gunicorn:
 # gunicorn -w 2 -k gthread -b 0.0.0.0:$PORT webhook_to_alpaca_price_action:app
