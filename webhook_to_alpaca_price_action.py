@@ -76,20 +76,20 @@ def ping():
     
 # Quick server→Alpaca test: POST /selftest?token=let_me_in
 SELFTEST_TOKEN = os.getenv("SELFTEST_TOKEN", "let_me_in")
-    
 @app.route("/selftest", methods=["POST"])
-    def selftest():
-        if request.args.get("token") != SELFTEST_TOKEN:
-            return jsonify({"ok": False, "error": "forbidden"}), 403
-        try:
-            order = api.submit_order(
-                symbol="AAPL", qty=1, side="buy", type="market", time_in_force="day"
-            )
-            log("selftest_order", id=order.id, symbol="AAPL", side="buy", qty=1)
-            return jsonify({"ok": True, "order_id": order.id}), 200
-        except Exception as e:
-            log("selftest_error", level="error", error=str(e))
-            return jsonify({"ok": False, "error": str(e)}), 500    
+
+def selftest():
+    if request.args.get("token") != SELFTEST_TOKEN:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    try:
+        order = api.submit_order(
+            symbol="AAPL", qty=1, side="buy", type="market", time_in_force="day"
+        )
+        log("selftest_order", id=order.id, symbol="AAPL", side="buy", qty=1)
+        return jsonify({"ok": True, "order_id": order.id}), 200
+    except Exception as e:
+        log("selftest_error", level="error", error=str(e))
+        return jsonify({"ok": False, "error": str(e)}), 500    
                 
 # ---------- Root health (browser-friendly) ----------
 @app.route("/", methods=["GET"])
