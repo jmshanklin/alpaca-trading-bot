@@ -1,26 +1,24 @@
 # webhook_to_alpaca_price_action.py
-# --------------------------------------------------------------------
-# TradingBot webhook for Alpaca (Render + Flask, Python 3.11+)
+# ------------------------------------------------------------
+# TradingView webhook -> Alpaca (Render + Flask)
 #
-# Supports:
-# - US equities (ex: TSLA): time_in_force defaults to "day", qty must be integer
-# - Crypto (ex: BTCUSD): time_in_force forced to "gtc", qty can be fractional
+# Goals:
+# - Accept TradingView webhook JSON (including text/plain bodies)
+# - Support equities (TSLA) with time_in_force="day"
+# - Support crypto (BTCUSD) with time_in_force forced to "gtc"
+# - Allow fractional qty for crypto (e.g., 0.001)
 #
-# Accepts JSON keys from TradingView or tests:
-# - symbol: "TSLA" or "BTCUSD"
-# - side OR action: "buy" | "sell" | "close"
-# - qty: 1 (equities) or 0.001 (crypto)
-# - time_in_force: "day" (equities). Ignored for crypto.
-# - client_id: optional idempotency key
-# - key/secret: optional if not using ?key=... in URL
-# --------------------------------------------------------------------
+# Accepts either "side" or "action" from TradingView:
+#   {"symbol":"BTCUSD","side":"buy","qty":0.001}
+#   {"symbol":"BTCUSD","action":"buy","qty":0.001}
+# ------------------------------------------------------------
 
 from flask import Flask, request, jsonify
 import os
 import uuid
 import hmac
-import logging
 import json
+import logging
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
@@ -56,7 +54,7 @@ SELFTEST_TOKEN = os.getenv("SELFTEST_TOKEN", "let_me_in")
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 app = Flask(__name__)
 
-# ---------- Health / Ping ----------
+# ---------- Health ----------
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({
@@ -68,7 +66,7 @@ def root():
 
 @app.route("/ping", methods=["GET"])
 def ping():
-    return jsonify({"status": "ok", "service": "TradingBot", "version": "2.1.0"}), 200
+    return jsonify({"status": "ok"}), 200
 
 @app.route("/healthz", methods=["GET"])
 def healthz():
@@ -88,24 +86,23 @@ def selftest():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ---------- Helpers ----------
-def get_asset_class(symbol: str) -> str:
+def detect_crypto(symbol: str) -> bool:
+    # Best: ask Alpaca what it is
     try:
         asset = api.get_asset(symbol)
         cls = getattr(asset, "class", None) or getattr(asset, "_raw", {}).get("class")
-        return (cls or "unknown").lower()
+        return (cls or "").lower() == "crypto"
     except Exception:
-        return "unknown"
-
-def is_crypto(symbol: str) -> bool:
-    return get_asset_class(symbol) == "crypto"
+        # Fallback: common crypto pairs
+        return symbol.upper() in {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LTCUSD"}
 
 def parse_qty(raw_qty, crypto: bool):
     """
-    crypto: allow fractional, return string (Alpaca accepts fractional qty safely as string)
-    equity: require integer, return int
+    Crypto: allow fractional, return string decimal for Alpaca
+    Equity: require integer, return int
     """
     if raw_qty is None:
-        return ("1" if crypto else 1)
+        raw_qty = "0.001" if crypto else "1"
 
     if crypto:
         try:
@@ -113,93 +110,84 @@ def parse_qty(raw_qty, crypto: bool):
         except InvalidOperation:
             raise ValueError("qty must be numeric for crypto (example: 0.001)")
         if q <= 0:
-            raise ValueError("qty must be > 0 for crypto")
-        return str(q)
+            raise ValueError("qty must be > 0")
+        return str(q)  # IMPORTANT: keep fractional as string
+    else:
+        try:
+            q = int(str(raw_qty))
+        except Exception:
+            raise ValueError("qty must be an integer for equities (example: 1)")
+        if q <= 0:
+            raise ValueError("qty must be > 0")
+        return q
 
-    # equities
+def get_json_body():
+    # TradingView sometimes sends text/plain. Handle both.
+    raw = request.get_data(as_text=True) or ""
+    data = request.get_json(silent=True)
+    if data is not None:
+        return data, raw
     try:
-        q_int = int(str(raw_qty))
+        if raw.strip().startswith("{"):
+            return json.loads(raw), raw
     except Exception:
-        raise ValueError("qty must be an integer for equities (example: 1)")
-    if q_int <= 0:
-        raise ValueError("qty must be > 0 for equities")
-    return q_int
+        pass
+    return {}, raw
 
 # ---------- Webhook ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     req_id = str(uuid.uuid4())[:8]
+    data, raw = get_json_body()
 
-    # --- Accept JSON OR raw text that contains JSON ---
-    raw = request.get_data(as_text=True) or ""
-    data = request.get_json(silent=True)
-
-    if data is None:
-        try:
-            data = json.loads(raw) if raw.strip().startswith("{") else {}
-        except Exception:
-            data = {}
-
-    if not isinstance(data, dict):
-        data = {}
-
-    # --- Identify source for logs ---
-    ua = request.headers.get("User-Agent", "unknown").lower()
-    if "tradingview" in ua:
-        src = "tradingview"
-    elif "powershell" in ua:
-        src = "powershell"
-    elif "curl" in ua:
-        src = "curl"
-    else:
-        src = "unknown"
-
-    safe = {k: ("***" if k.lower() in {"key", "secret"} else v) for k, v in data.items()}
-    log("received", req_id=req_id, source=src, **safe)
+    ua = request.headers.get("User-Agent", "unknown")
+    src = "TradingView" if "tradingview" in ua.lower() else ("powershell" if "powershell" in ua.lower() else "unknown")
 
     # --- Auth: accept ?key=... OR JSON key/secret ---
     provided = (
         request.args.get("key")
         or request.args.get("token")
-        or data.get("key")
-        or data.get("secret")
+        or (data.get("key") if isinstance(data, dict) else None)
+        or (data.get("secret") if isinstance(data, dict) else None)
         or ""
     )
     if WEBHOOK_KEY and not hmac.compare_digest(str(provided), str(WEBHOOK_KEY)):
-        log("unauthorized", level="warning", req_id=req_id)
+        log("unauthorized", level="warning", req_id=req_id, source=src)
         return jsonify({"status": "error", "message": "unauthorized"}), 401
 
-    # --- Normalize fields (support TradingView 'action' OR 'side') ---
-    symbol = (data.get("symbol") or "TSLA").upper().strip()
-    side = (data.get("side") or data.get("action") or "buy").lower().strip()
+    # Log receipt (mask key)
+    safe = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            safe[k] = "***" if str(k).lower() in {"key", "secret"} else v
+    log("received", req_id=req_id, source=src, **safe)
+
+    # --- Parse fields ---
+    symbol = (data.get("symbol") or "TSLA").upper().strip() if isinstance(data, dict) else "TSLA"
+    side   = (data.get("side") or data.get("action") or "buy").lower().strip() if isinstance(data, dict) else "buy"
 
     if side not in {"buy", "sell", "close"}:
         return jsonify({"status": "error", "message": "side/action must be buy/sell/close"}), 400
 
-    crypto = is_crypto(symbol)
+    crypto = detect_crypto(symbol)
 
-    # --- time_in_force rules ---
-    # Alpaca crypto does NOT accept "day". Force "gtc".
-    if crypto:
-        tif = "gtc"
-    else:
-        tif = (data.get("time_in_force") or "day").lower().strip()
+    # time_in_force rules
+    tif = "gtc" if crypto else (data.get("time_in_force") or "day").lower().strip()
 
-    # --- qty rules ---
+    # qty rules
     qty = None
     if side != "close":
         try:
-            qty = parse_qty(data.get("qty", 1), crypto=crypto)
+            qty = parse_qty((data.get("qty") if isinstance(data, dict) else None), crypto=crypto)
         except ValueError as e:
             return jsonify({"status": "error", "message": str(e)}), 400
 
-    # --- idempotency ---
-    client_id = data.get("client_id") or f"{symbol}-{side}-{data.get('qty', 1)}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    client_id = (
+        (data.get("client_id") if isinstance(data, dict) else None)
+        or f"{symbol}-{side}-{(data.get('qty', 'na') if isinstance(data, dict) else 'na')}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    )
 
     try:
-        # Close behavior:
-        # - equities: close_position(symbol)
-        # - crypto: keep simple: do not auto-close; send an explicit sell with qty instead
         if side == "close":
             if crypto:
                 return jsonify({"status": "error", "message": "close not supported for crypto in this tester; send sell with qty instead"}), 400
@@ -215,11 +203,11 @@ def webhook():
             time_in_force=tif,
             client_order_id=client_id,
         )
-        log("order_submitted", req_id=req_id, id=order.id, symbol=symbol, side=side, qty=qty, tif=tif, asset_class=("crypto" if crypto else "equity"))
+        log("order_submitted", req_id=req_id, id=order.id, symbol=symbol, side=side, qty=qty, tif=tif, asset=("crypto" if crypto else "equity"))
         return jsonify({"status": "success", "order_id": order.id, "client_id": client_id, "tif": tif}), 200
 
     except Exception as e:
         msg = str(e)
         log("order_error", level="error", req_id=req_id, error=msg, symbol=symbol, side=side, qty=qty, tif=tif)
-        # Keep 200 so TradingView doesn't hammer retries
+        # Keep 200 so TradingView doesn't retry aggressively
         return jsonify({"status": "error", "message": msg}), 200
