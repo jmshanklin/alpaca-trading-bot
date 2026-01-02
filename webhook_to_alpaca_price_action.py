@@ -186,10 +186,16 @@ if data is None:
     # qty rules
     qty = None
     if side != "close":
+        qty_raw = data.get("qty", 1)
         try:
-            qty = parse_qty(data.get("qty", 1), crypto=crypto)
-        except ValueError as e:
-            return jsonify({"status": "error", "message": str(e)}), 400
+            qty_dec = Decimal(str(qty_raw))
+        except InvalidOperation:
+            return jsonify({"status": "error", "message": "qty must be numeric"}), 400
+    
+        if qty_dec <= 0:
+            return jsonify({"status": "error", "message": "qty must be > 0"}), 400
+
+    qty = str(qty_dec)  # IMPORTANT: pass as string to Alpaca
 
     # idempotency
     client_id = (
