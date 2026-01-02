@@ -136,7 +136,17 @@ def parse_qty(raw_qty, crypto: bool):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     req_id = str(uuid.uuid4())[:8]
-    data = request.get_json(silent=True) or {}
+    import json
+
+raw = request.get_data(as_text=True) or ""
+data = request.get_json(silent=True)
+
+if data is None:
+    # TradingView often posts text/plain. If it looks like JSON, parse it.
+    try:
+        data = json.loads(raw) if raw.strip().startswith("{") else {}
+    except Exception:
+        data = {}
 
     ua = request.headers.get("User-Agent", "unknown")
     src = "TradingView" if "tradingview" in ua.lower() else ("powershell" if "powershell" in ua.lower() else "unknown")
