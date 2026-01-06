@@ -176,9 +176,15 @@ def webhook():
 
     # qty rules
     qty = None
-    if side != "close":
+    raw_qty = (data.get("qty") if isinstance(data, dict) else None)
+
+    # If TradingView sends {"side":"sell"} with NO qty for equities,
+    # treat that as sell-to-close (close_position).
+    sell_to_close_equity = (not crypto) and (side in {"sell", "close"}) and (raw_qty is None or str(raw_qty).strip() == "")
+
+    if not sell_to_close_equity and side != "close":
         try:
-            qty = parse_qty((data.get("qty") if isinstance(data, dict) else None), crypto=crypto)
+            qty = parse_qty(raw_qty, crypto=crypto)
         except ValueError as e:
             return jsonify({"status": "error", "message": str(e)}), 400
 
@@ -188,13 +194,19 @@ def webhook():
     )
 
     try:
+        # Equity sell-to-close: allow TradingView to send {"side":"sell"} without qty
+        if sell_to_close_equity:
+            api.close_position(symbol)
+            log("close_position", req_id=req_id, symbol=symbol, reason="sell_to_close_equity_no_qty")
+            return jsonify({"status": "success", "action": "close", "symbol": symbol}), 200
+    
         if side == "close":
             if crypto:
                 return jsonify({"status": "error", "message": "close not supported for crypto in this tester; send sell with qty instead"}), 400
             api.close_position(symbol)
             log("close_position", req_id=req_id, symbol=symbol)
             return jsonify({"status": "success", "action": "close", "symbol": symbol}), 200
-
+    
         order = api.submit_order(
             symbol=symbol,
             qty=qty,
@@ -203,6 +215,7 @@ def webhook():
             time_in_force=tif,
             client_order_id=client_id,
         )
+
         log("order_submitted", req_id=req_id, id=order.id, symbol=symbol, side=side, qty=qty, tif=tif, asset=("crypto" if crypto else "equity"))
         return jsonify({"status": "success", "order_id": order.id, "client_id": client_id, "tif": tif}), 200
 
