@@ -11,6 +11,11 @@
 # Accepts either "side" or "action" from TradingView:
 #   {"symbol":"BTCUSD","side":"buy","qty":0.001}
 #   {"symbol":"BTCUSD","action":"buy","qty":0.001}
+#
+# NEW:
+# - Equity sell-to-close supported:
+#   If TradingView sends {"side":"sell"} or {"side":"close"} with NO qty (or blank qty),
+#   Render will call Alpaca close_position(symbol) to close the entire position.
 # ------------------------------------------------------------
 
 from flask import Flask, request, jsonify
@@ -60,7 +65,7 @@ def root():
     return jsonify({
         "status": "ok",
         "service": "TradingBot",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "endpoints": ["/webhook", "/ping", "/healthz", "/selftest"],
     }), 200
 
@@ -87,13 +92,14 @@ def selftest():
 
 # ---------- Helpers ----------
 def detect_crypto(symbol: str) -> bool:
-    # Best: ask Alpaca what it is
+    """
+    Best: ask Alpaca what it is. Fallback: common crypto pairs.
+    """
     try:
         asset = api.get_asset(symbol)
         cls = getattr(asset, "class", None) or getattr(asset, "_raw", {}).get("class")
         return (cls or "").lower() == "crypto"
     except Exception:
-        # Fallback: common crypto pairs
         return symbol.upper() in {"BTCUSD", "ETHUSD", "SOLUSD", "AVAXUSD", "LTCUSD"}
 
 def parse_qty(raw_qty, crypto: bool):
@@ -122,7 +128,9 @@ def parse_qty(raw_qty, crypto: bool):
         return q
 
 def get_json_body():
-    # TradingView sometimes sends text/plain. Handle both.
+    """
+    TradingView sometimes sends text/plain. Handle both JSON and raw JSON strings.
+    """
     raw = request.get_data(as_text=True) or ""
     data = request.get_json(silent=True)
     if data is not None:
@@ -141,7 +149,10 @@ def webhook():
     data, raw = get_json_body()
 
     ua = request.headers.get("User-Agent", "unknown")
-    src = "TradingView" if "tradingview" in ua.lower() else ("powershell" if "powershell" in ua.lower() else "unknown")
+    src = (
+        "TradingView" if "tradingview" in ua.lower()
+        else ("powershell" if "powershell" in ua.lower() else "unknown")
+    )
 
     # --- Auth: accept ?key=... OR JSON key/secret ---
     provided = (
@@ -155,7 +166,7 @@ def webhook():
         log("unauthorized", level="warning", req_id=req_id, source=src)
         return jsonify({"status": "error", "message": "unauthorized"}), 401
 
-    # Log receipt (mask key)
+    # Log receipt (mask key/secret if present)
     safe = {}
     if isinstance(data, dict):
         for k, v in data.items():
@@ -164,7 +175,7 @@ def webhook():
 
     # --- Parse fields ---
     symbol = (data.get("symbol") or "TSLA").upper().strip() if isinstance(data, dict) else "TSLA"
-    side   = (data.get("side") or data.get("action") or "buy").lower().strip() if isinstance(data, dict) else "buy"
+    side = (data.get("side") or data.get("action") or "buy").lower().strip() if isinstance(data, dict) else "buy"
 
     if side not in {"buy", "sell", "close"}:
         return jsonify({"status": "error", "message": "side/action must be buy/sell/close"}), 400
@@ -178,11 +189,18 @@ def webhook():
     qty = None
     raw_qty = (data.get("qty") if isinstance(data, dict) else None)
 
-    # If TradingView sends {"side":"sell"} with NO qty for equities,
+    # If TradingView sends {"side":"sell"} OR {"side":"close"} with NO qty for equities,
     # treat that as sell-to-close (close_position).
-    sell_to_close_equity = (not crypto) and (side == "sell") and (raw_qty is None or str(raw_qty).strip() == "")
+    sell_to_close_equity = (
+        (not crypto)
+        and (side in {"sell", "close"})
+        and (raw_qty is None or str(raw_qty).strip() == "")
+    )
 
-    if not sell_to_close_equity and side != "close":
+    # Parse qty only when we actually need it:
+    # - buy always needs qty
+    # - sell needs qty only if it's NOT a sell-to-close
+    if side == "buy" or (side == "sell" and not sell_to_close_equity):
         try:
             qty = parse_qty(raw_qty, crypto=crypto)
         except ValueError as e:
@@ -194,29 +212,38 @@ def webhook():
     )
 
     try:
-        # Equity sell-to-close: allow TradingView to send {"side":"sell"} without qty
+        # Equity sell-to-close: allow TradingView to send {"side":"sell"} or {"side":"close"} without qty
         if sell_to_close_equity:
-            api.close_position(symbol)
-            log("close_position", req_id=req_id, symbol=symbol, side=side, raw_qty=raw_qty, reason="sell_to_close_equity_no_qty")
-            return jsonify({"status": "success", "action": "close", "symbol": symbol}), 200
-    
-        if side == "close":
             if crypto:
-                return jsonify({"status": "error", "message": "close not supported for crypto in this tester; send sell with qty instead"}), 400
+                return jsonify({
+                    "status": "error",
+                    "message": "close not supported for crypto; send sell with qty instead"
+                }), 400
+
             api.close_position(symbol)
-            log("close_position", req_id=req_id, symbol=symbol)
+            log("close_position", req_id=req_id, symbol=symbol, reason="sell_to_close_equity_no_qty")
             return jsonify({"status": "success", "action": "close", "symbol": symbol}), 200
-    
+
+        # Normal order path (buy, or sell with explicit qty)
         order = api.submit_order(
             symbol=symbol,
             qty=qty,
-            side=side,
+            side=("sell" if side == "close" else side),  # safety: should never be "close" here
             type="market",
             time_in_force=tif,
             client_order_id=client_id,
         )
 
-        log("order_submitted", req_id=req_id, id=order.id, symbol=symbol, side=side, qty=qty, tif=tif, asset=("crypto" if crypto else "equity"))
+        log(
+            "order_submitted",
+            req_id=req_id,
+            id=order.id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            tif=tif,
+            asset=("crypto" if crypto else "equity"),
+        )
         return jsonify({"status": "success", "order_id": order.id, "client_id": client_id, "tif": tif}), 200
 
     except Exception as e:
