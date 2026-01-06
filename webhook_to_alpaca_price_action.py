@@ -180,7 +180,7 @@ def webhook():
 
     # If TradingView sends {"side":"sell"} with NO qty for equities,
     # treat that as sell-to-close (close_position).
-    sell_to_close_equity = (not crypto) and (side in {"sell", "close"}) and (raw_qty is None or str(raw_qty).strip() == "")
+    sell_to_close_equity = (not crypto) and (side == "sell") and (raw_qty is None or str(raw_qty).strip() == "")
 
     if not sell_to_close_equity and side != "close":
         try:
@@ -197,7 +197,7 @@ def webhook():
         # Equity sell-to-close: allow TradingView to send {"side":"sell"} without qty
         if sell_to_close_equity:
             api.close_position(symbol)
-            log("close_position", req_id=req_id, symbol=symbol, reason="sell_to_close_equity_no_qty")
+            log("close_position", req_id=req_id, symbol=symbol, side=side, raw_qty=raw_qty, reason="sell_to_close_equity_no_qty")
             return jsonify({"status": "success", "action": "close", "symbol": symbol}), 200
     
         if side == "close":
