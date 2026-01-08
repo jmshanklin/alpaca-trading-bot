@@ -33,12 +33,7 @@ def main():
                 time.sleep(30)
                 continue
 
-            bars = api.get_bars(SYMBOL, tradeapi.TimeFrame.Minute, limit=1)
-            if not bars:
-                time.sleep(2)
-                continue
-
-            b = bars[-1]
+            b = api.get_latest_bar(SYMBOL)
             bar_time = b.t
 
             if last_bar_time == bar_time:
