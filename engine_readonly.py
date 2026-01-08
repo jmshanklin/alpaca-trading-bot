@@ -40,7 +40,7 @@ formatter.formatTime = _formatTime
 DRY_RUN = os.getenv("DRY_RUN", "true").strip().lower() in ("1", "true", "yes", "y", "on")
 ORDER_QTY = int(os.getenv("ORDER_QTY", "1"))
 DROP_PCT = float(os.getenv("DROP_PCT", "0.0015"))  # 0.15% default
-POLL_SEC = float(os.getenv("POLL_SEC", "1"))
+POLL_SEC = float(os.getenv("POLL_SEC", "1"))  # float lets you do 0.5 later if you want
 
 ALPACA_KEY_ID     = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
@@ -59,6 +59,15 @@ def get_live_price(symbol: str) -> float:
 
 def main():
     logging.info(f"ENGINE_START drop_pct={DROP_PCT:.6f} dry_run={DRY_RUN} symbol={SYMBOL}")
+    
+    logging.info(
+        "ENGINE_CONFIG "
+        f"symbol={SYMBOL} "
+        f"drop_pct={DROP_PCT:.6f} "
+        f"order_qty={ORDER_QTY} "
+        f"poll_sec={POLL_SEC} "
+        f"dry_run={DRY_RUN}"
+    )
 
     # Wait for market open
     while True:
@@ -73,7 +82,7 @@ def main():
     next_trigger = anchor_price * (1.0 - DROP_PCT)
 
     logging.info(f"ANCHOR_INIT anchor={anchor_price:.2f} next_trigger={next_trigger:.2f}")
-
+    
     while True:
         try:
             clock = api.get_clock()
