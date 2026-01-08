@@ -2,8 +2,10 @@ import os
 import time
 import logging
 from datetime import datetime
-
 import alpaca_trade_api as tradeapi
+import os
+
+DRY_RUN = os.getenv("DRY_RUN", "true").strip().lower() in ("1", "true", "yes", "y", "on")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,7 +57,18 @@ def main():
             )
 
             if is_red:
-                logging.info("SIGNAL WOULD_BUY (dry-run)")
+                if DRY_RUN:
+                    logging.info("SIGNAL WOULD_BUY (dry-run)")
+                else:
+                    qty = int(os.getenv("ORDER_QTY", "1"))  # safety default = 1 share
+                    logging.info(f"SIGNAL BUY (paper) qty={qty} submitting market order")
+                    api.submit_order(
+                        symbol=SYMBOL,
+                        qty=qty,
+                        side="buy",
+                        type="market",
+                        time_in_force="day",
+                    )
 
         except Exception as e:
             logging.error(f"ENGINE_ERROR {e}", exc_info=True)
