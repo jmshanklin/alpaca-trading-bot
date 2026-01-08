@@ -1,16 +1,46 @@
 import os
 import time
 import logging
-from datetime import datetime
+from zoneinfo import ZoneInfo
 import alpaca_trade_api as tradeapi
-import os
 
+# ---- Logging in Central Time (CT) ----
+class CTFormatter(logging.Formatter):
+    converter = lambda self, ts: time.gmtime(ts)  # will be overridden below
+
+def ct_time_converter(*args):
+    # Convert "now" to America/Chicago for log timestamps
+    return time.localtime()
+
+# We'll set formatter with custom time format manually:
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+handler = logging.StreamHandler()
+formatter = logging.Formatter(fmt="%(asctime)s CT [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+handler.setFormatter(formatter)
+logger.handlers = [handler]
+
+CT = ZoneInfo("America/Chicago")
+
+def ct_asctime(record, datefmt=None):
+    dt = record.created
+    # record.created is epoch seconds
+    from datetime import datetime
+    return datetime.fromtimestamp(dt, tz=CT).strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+
+# Monkey-patch formatter to use CT time
+_old_formatTime = formatter.formatTime
+def _formatTime(record, datefmt=None):
+    return ct_asctime(record, datefmt)
+formatter.formatTime = _formatTime
+
+
+# ---- Env vars ----
 DRY_RUN = os.getenv("DRY_RUN", "true").strip().lower() in ("1", "true", "yes", "y", "on")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+ORDER_QTY = int(os.getenv("ORDER_QTY", "1"))
+DROP_PCT = float(os.getenv("DROP_PCT", "0.0015"))  # 0.15% default
+POLL_SEC = float(os.getenv("POLL_SEC", "1"))
 
 ALPACA_KEY_ID     = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
@@ -20,10 +50,29 @@ SYMBOL = os.getenv("ENGINE_SYMBOL", "TSLA").upper()
 
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
-def main():
-    logging.info(f"ENGINE_START readonly symbol={SYMBOL}")
+def get_live_price(symbol: str) -> float:
+    """
+    Uses latest trade price (not candles).
+    """
+    t = api.get_latest_trade(symbol)
+    return float(t.price)
 
-    last_bar_time = None
+def main():
+    logging.info(f"ENGINE_START drop_pct={DROP_PCT:.6f} dry_run={DRY_RUN} symbol={SYMBOL}")
+
+    # Wait for market open
+    while True:
+        clock = api.get_clock()
+        if clock.is_open:
+            break
+        logging.info("MARKET_CLOSED waiting...")
+        time.sleep(30)
+
+    # Step 1 Option A: Anchor initializes from live market price
+    anchor_price = get_live_price(SYMBOL)
+    next_trigger = anchor_price * (1.0 - DROP_PCT)
+
+    logging.info(f"ANCHOR_INIT anchor={anchor_price:.2f} next_trigger={next_trigger:.2f}")
 
     while True:
         try:
@@ -33,37 +82,29 @@ def main():
                 time.sleep(30)
                 continue
 
-            b = api.get_latest_bar(SYMBOL)
-            bar_time = b.t
+            price = get_live_price(SYMBOL)
 
-            if last_bar_time == bar_time:
-                time.sleep(2)
-                continue
+            logging.info(f"PRICE {SYMBOL} last={price:.2f} anchor={anchor_price:.2f} next_trigger={next_trigger:.2f}")
 
-            last_bar_time = bar_time
-
-            o = float(b.o)
-            c = float(b.c)
-            is_red = c < o
-            is_green = c > o
-
-            logging.info(
-                f"BAR_CLOSE {SYMBOL} t={bar_time} O={o:.2f} C={c:.2f} red={is_red} green={is_green}"
-            )
-
-            if is_red:
+            if price <= next_trigger:
                 if DRY_RUN:
-                    logging.info("SIGNAL WOULD_BUY (dry-run)")
+                    logging.info(f"SIGNAL WOULD_BUY drop_pct={DROP_PCT:.6f} at_price={price:.2f}")
                 else:
-                    qty = int(os.getenv("ORDER_QTY", "1"))  # safety default = 1 share
-                    logging.info(f"SIGNAL BUY (paper) qty={qty} submitting market order")
+                    logging.info(f"SIGNAL BUY (paper) qty={ORDER_QTY} submitting market order at_price={price:.2f}")
                     api.submit_order(
                         symbol=SYMBOL,
-                        qty=qty,
+                        qty=ORDER_QTY,
                         side="buy",
                         type="market",
                         time_in_force="day",
                     )
+
+                # After BUY trigger: anchor becomes the trigger price (step logic)
+                anchor_price = next_trigger
+                next_trigger = anchor_price * (1.0 - DROP_PCT)
+                logging.info(f"ANCHOR_UPDATE anchor={anchor_price:.2f} next_trigger={next_trigger:.2f}")
+
+            time.sleep(POLL_SEC)
 
         except Exception as e:
             logging.error(f"ENGINE_ERROR {e}", exc_info=True)
