@@ -12,16 +12,49 @@ import alpaca_trade_api as tradeapi
 # =========================
 CT = ZoneInfo("America/Chicago")
 
+
 class CTFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=CT)
         return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 handler.setFormatter(CTFormatter(fmt="%(asctime)s CT [%(levelname)s] %(message)s"))
 logger.handlers = [handler]
+
+
+# =========================
+# Persistence helpers
+# =========================
+def resolve_state_path() -> str:
+    """
+    Choose a writable state path.
+    Prefers Render disk mount (default /var/data) if writable, else falls back to /tmp.
+    """
+    state_dir = os.getenv("STATE_DIR", "/var/data")
+    state_file = os.getenv("STATE_FILE", "engine_state.json")
+    state_path = os.getenv("STATE_PATH", os.path.join(state_dir, state_file))
+
+    try:
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+
+        # quick write test to confirm this path is writable
+        testfile = os.path.join(os.path.dirname(state_path), ".write_test")
+        with open(testfile, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(testfile)
+
+        return state_path
+    except Exception as e:
+        fallback_dir = "/tmp"
+        os.makedirs(fallback_dir, exist_ok=True)
+        fallback_path = os.path.join(fallback_dir, state_file)
+        logging.warning(f"STATE_PATH not writable ({e}); falling back to {fallback_path}")
+        return fallback_path
+
 
 # =========================
 # Env vars
@@ -32,44 +65,44 @@ ORDER_QTY = int(os.getenv("ORDER_QTY", "1"))
 # Polling for new closed bars
 POLL_SEC = float(os.getenv("POLL_SEC", "1.0"))
 
-# Fill logging (used when DRY_RUN=false and we submit real paper orders)
+# Fill logging (used when DRY_RUN=false and we submit orders)
 FILL_TIMEOUT_SEC = float(os.getenv("FILL_TIMEOUT_SEC", "20"))
-FILL_POLL_SEC    = float(os.getenv("FILL_POLL_SEC", "0.5"))
+FILL_POLL_SEC = float(os.getenv("FILL_POLL_SEC", "0.5"))
 
-# Safety cap: if something goes wrong, do not spam buys in one loop tick
+# Safety cap: prevents spamming buys in a single loop tick
 MAX_BUYS_PER_TICK = int(os.getenv("MAX_BUYS_PER_TICK", "1"))
 
 # Optional: log manual liquidation / position changes
-LOG_POSITION_CHANGES = os.getenv("LOG_POSITION_CHANGES", "true").strip().lower() in ("1", "true", "yes", "y", "on")
+LOG_POSITION_CHANGES = os.getenv("LOG_POSITION_CHANGES", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+    "on",
+)
 
 # Persistence
-STATE_DIR  = os.getenv("STATE_DIR", "/var/data")
-STATE_FILE = os.getenv("STATE_FILE", "state.json")
-STATE_PATH = os.getenv("STATE_PATH", os.path.join(STATE_DIR, STATE_FILE))
+STATE_PATH = resolve_state_path()
 
-ALPACA_KEY_ID     = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
+# Alpaca connection
+ALPACA_KEY_ID = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
-ALPACA_BASE_URL   = os.getenv("ALPACA_BASE_URL") or os.getenv("APCA_API_BASE_URL") or "https://paper-api.alpaca.markets"
+ALPACA_BASE_URL = (
+    os.getenv("ALPACA_BASE_URL")
+    or os.getenv("APCA_API_BASE_URL")
+    or "https://paper-api.alpaca.markets"
+)
+
 SYMBOL = os.getenv("ENGINE_SYMBOL", "TSLA").upper()
 
-# Ensure persistence directory exists
-os.makedirs(STATE_DIR, exist_ok=True)
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
-# =========================
-# Helpers
-# =========================
-def ensure_state_dir():
-    try:
-        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    except Exception:
-        # If disk isn't attached, /var/data may not exist; that's fine — persistence just won't work
-        pass
 
-def load_state():
-    """
-    Load persisted state from disk (if present).
-    """
+# =========================
+# State I/O
+# =========================
+def load_state() -> dict:
+    """Load persisted state from disk (if present)."""
     try:
         if os.path.exists(STATE_PATH):
             with open(STATE_PATH, "r", encoding="utf-8") as f:
@@ -79,25 +112,31 @@ def load_state():
         logging.warning(f"STATE_LOAD failed: {e}")
     return {}
 
-def save_state(state: dict):
-    """
-    Persist state to disk.
-    """
+
+def save_state(state: dict) -> None:
+    """Persist state to disk."""
     try:
-        ensure_state_dir()
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
         with open(STATE_PATH, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, sort_keys=True)
     except Exception as e:
         logging.warning(f"STATE_SAVE failed: {e}")
 
+
+# =========================
+# Trading helpers
+# =========================
 def get_position_qty(symbol: str) -> float:
+    """Returns current position qty (0.0 if no position)."""
     try:
         pos = api.get_position(symbol)
         return float(pos.qty)
     except Exception:
         return 0.0
 
+
 def submit_market_buy(symbol: str, qty: int):
+    """Submit a market buy and return the Alpaca Order object."""
     return api.submit_order(
         symbol=symbol,
         qty=qty,
@@ -106,6 +145,7 @@ def submit_market_buy(symbol: str, qty: int):
         time_in_force="day",
     )
 
+
 def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
     """
     Poll the order until it is filled/canceled/rejected/expired, or until timeout.
@@ -113,38 +153,42 @@ def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
     """
     start = time.time()
     last = None
+
     while True:
         o = api.get_order(order_id)
         last = o
         status = (o.status or "").lower()
+
         if status in ("filled", "canceled", "rejected", "expired"):
             return o
+
         if time.time() - start >= timeout_sec:
             return o
+
         time.sleep(poll_sec)
+
 
 def pick_latest_closed_bar(symbol: str, now_utc: datetime):
     """
     Fetch recent 1-min bars and choose the latest bar that is definitely closed.
-    We consider a bar closed if its timestamp is < current minute floor.
+
+    Rule: a bar is closed if its timestamp is < current minute floor (UTC).
     """
-    # Get a few bars to be safe
     bars = api.get_bars(symbol, tradeapi.TimeFrame.Minute, limit=5)
     if not bars:
         return None
 
-    # Floor "now" to the minute
     now_floor = now_utc.replace(second=0, microsecond=0)
 
-    # Pick newest bar with t < now_floor
     for b in reversed(bars):
         bt = b.t
-        # Ensure timezone-aware comparison
         if bt.tzinfo is None:
             bt = bt.replace(tzinfo=timezone.utc)
         if bt < now_floor:
             return b
+
     return None
+
 
 # =========================
 # Main
@@ -166,8 +210,8 @@ def main():
 
     # ---- Load persisted state ----
     state = load_state()
-    last_bar_ts_iso = state.get("last_bar_ts")               # ISO string
-    last_red_buy_close = state.get("last_red_buy_close")     # float
+    last_bar_ts_iso = state.get("last_bar_ts")  # ISO string
+    last_red_buy_close = state.get("last_red_buy_close")  # float or None
     buy_count = int(state.get("buy_count", 0))
 
     # Convert last_bar_ts back to datetime (UTC)
@@ -200,13 +244,15 @@ def main():
                 time.sleep(30)
                 continue
 
-            # optional position-change logging (manual liquidation)
+            # Optional: detect manual liquidation (or any external position change)
             if LOG_POSITION_CHANGES:
                 pos_qty = get_position_qty(SYMBOL)
                 if last_pos_qty is None:
                     last_pos_qty = pos_qty
                 elif pos_qty != last_pos_qty:
-                    logging.info(f"POSITION_CHANGE qty_from={last_pos_qty:.4f} qty_to={pos_qty:.4f}")
+                    logging.info(
+                        f"POSITION_CHANGE qty_from={last_pos_qty:.4f} qty_to={pos_qty:.4f}"
+                    )
                     last_pos_qty = pos_qty
 
             # Use Alpaca clock timestamp as "now" (UTC)
@@ -244,41 +290,51 @@ def main():
                     reason = "FIRST_RED_BUY"
                 else:
                     should_buy = c < float(last_red_buy_close)
-                    reason = "LOWER_THAN_LAST_RED_BUY" if should_buy else "NOT_LOWER_THAN_LAST_RED_BUY"
+                    reason = (
+                        "LOWER_THAN_LAST_RED_BUY" if should_buy else "NOT_LOWER_THAN_LAST_RED_BUY"
+                    )
 
                 if should_buy:
-                    buy_count += 1
-                    buys_this_tick += 1
-
-                    if DRY_RUN:
-                        logging.info(
-                            f"SIM_BUY #{buy_count} reason={reason} "
-                            f"close={c:.2f} last_red_buy_close={last_red_buy_close} qty={ORDER_QTY}"
+                    if buys_this_tick >= MAX_BUYS_PER_TICK:
+                        logging.warning(
+                            f"BUY_LIMIT reached MAX_BUYS_PER_TICK={MAX_BUYS_PER_TICK} "
+                            f"bar_ts={bar_ts.isoformat()} close={c:.2f}"
                         )
                     else:
+                        buy_count += 1
+                        buys_this_tick += 1
+
+                        if DRY_RUN:
+                            logging.info(
+                                f"SIM_BUY #{buy_count} reason={reason} "
+                                f"close={c:.2f} last_red_buy_close={last_red_buy_close} qty={ORDER_QTY}"
+                            )
+                        else:
+                            logging.info(
+                                f"BUY_SIGNAL #{buy_count} reason={reason} "
+                                f"close={c:.2f} last_red_buy_close={last_red_buy_close} qty={ORDER_QTY}"
+                            )
+                            order = submit_market_buy(SYMBOL, ORDER_QTY)
+                            logging.info(
+                                f"ORDER_SUBMITTED id={order.id} qty={ORDER_QTY} type=market side=buy"
+                            )
+
+                            final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
+                            status = (final.status or "").lower()
+
+                            avg_fill = getattr(final, "filled_avg_price", None)
+                            filled_qty = getattr(final, "filled_qty", None)
+
+                            logging.info(
+                                f"ORDER_FINAL id={order.id} status={status} "
+                                f"filled_qty={filled_qty} avg_fill_price={avg_fill}"
+                            )
+
+                        # Update “memory” only when we actually buy
+                        last_red_buy_close = float(c)
                         logging.info(
-                            f"BUY_SIGNAL #{buy_count} reason={reason} "
-                            f"close={c:.2f} last_red_buy_close={last_red_buy_close} qty={ORDER_QTY}"
+                            f"RED_BUY_MEMORY_UPDATE last_red_buy_close={last_red_buy_close:.2f}"
                         )
-                        order = submit_market_buy(SYMBOL, ORDER_QTY)
-                        logging.info(f"ORDER_SUBMITTED id={order.id} qty={ORDER_QTY} type=market side=buy")
-
-                        final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
-                        status = (final.status or "").lower()
-
-                        # avg_fill_price is usually present when filled
-                        avg_fill = getattr(final, "filled_avg_price", None)
-                        filled_qty = getattr(final, "filled_qty", None)
-
-                        logging.info(
-                            f"ORDER_FINAL id={order.id} status={status} "
-                            f"filled_qty={filled_qty} avg_fill_price={avg_fill}"
-                        )
-
-                    # Update the “memory” only when we actually buy
-                    last_red_buy_close = float(c)
-                    logging.info(f"RED_BUY_MEMORY_UPDATE last_red_buy_close={last_red_buy_close:.2f}")
-
                 else:
                     logging.info(
                         f"RED_SKIP reason={reason} close={c:.2f} last_red_buy_close={last_red_buy_close}"
@@ -286,19 +342,21 @@ def main():
 
             # Update last processed bar and persist
             last_bar_ts = bar_ts
-            state = {
-                "last_bar_ts": last_bar_ts.isoformat(),
-                "last_red_buy_close": last_red_buy_close,
-                "buy_count": buy_count,
-                "symbol": SYMBOL,
-            }
-            save_state(state)
+            save_state(
+                {
+                    "last_bar_ts": last_bar_ts.isoformat(),
+                    "last_red_buy_close": last_red_buy_close,
+                    "buy_count": buy_count,
+                    "symbol": SYMBOL,
+                }
+            )
 
             time.sleep(POLL_SEC)
 
         except Exception as e:
             logging.error(f"ENGINE_ERROR {e}", exc_info=True)
             time.sleep(5)
+
 
 if __name__ == "__main__":
     main()
