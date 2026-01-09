@@ -50,9 +50,10 @@ STATE_PATH = os.getenv("STATE_PATH", os.path.join(STATE_DIR, STATE_FILE))
 ALPACA_KEY_ID     = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
 ALPACA_BASE_URL   = os.getenv("ALPACA_BASE_URL") or os.getenv("APCA_API_BASE_URL") or "https://paper-api.alpaca.markets"
-
 SYMBOL = os.getenv("ENGINE_SYMBOL", "TSLA").upper()
 
+# Ensure persistence directory exists
+os.makedirs(STATE_DIR, exist_ok=True)
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
 # =========================
