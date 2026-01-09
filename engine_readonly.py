@@ -29,7 +29,11 @@ DRY_RUN = os.getenv("DRY_RUN", "true").strip().lower() in ("1", "true", "yes", "
 ORDER_QTY = int(os.getenv("ORDER_QTY", "1"))
 DROP_PCT = float(os.getenv("DROP_PCT", "0.0015"))  # 0.15% default
 POLL_SEC = float(os.getenv("POLL_SEC", "1"))
-MAX_BUYS_PER_TICK = int(os.getenv("MAX_BUYS_PER_TICK", "3"))  # safety cap per poll
+
+FILL_TIMEOUT_SEC = float(os.getenv("FILL_TIMEOUT_SEC", "20"))
+FILL_POLL_SEC    = float(os.getenv("FILL_POLL_SEC", "0.5"))
+
+MAX_BUYS_PER_TICK = int(os.getenv("MAX_BUYS_PER_TICK", "3"))  # safety cap per price poll
 
 # Optional: log manual liquidation / position changes
 LOG_POSITION_CHANGES = os.getenv("LOG_POSITION_CHANGES", "true").strip().lower() in ("1", "true", "yes", "y", "on")
@@ -58,16 +62,49 @@ def get_position_qty(symbol: str) -> float:
     except Exception:
         return 0.0
 
-def main():
-    logging.info(
-        f"ENGINE_START drop_pct={DROP_PCT:.6f} dry_run={DRY_RUN} symbol={SYMBOL}"
+def submit_market_buy(symbol: str, qty: int):
+    """
+    Submit a market buy and return the Alpaca Order object.
+    """
+    return api.submit_order(
+        symbol=symbol,
+        qty=qty,
+        side="buy",
+        type="market",
+        time_in_force="day",
     )
+
+def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
+    """
+    Poll the order until it is filled/canceled/rejected/expired, or until timeout.
+    Returns the final Order object (or last seen).
+    """
+    start = time.time()
+    last = None
+
+    while True:
+        o = api.get_order(order_id)
+        last = o
+        status = (o.status or "").lower()
+
+        if status in ("filled", "canceled", "rejected", "expired"):
+            return o
+
+        if time.time() - start >= timeout_sec:
+            return o  # timeout: return last known state
+
+        time.sleep(poll_sec)
+
+def main():
+    logging.info(f"ENGINE_START drop_pct={DROP_PCT:.6f} dry_run={DRY_RUN} symbol={SYMBOL}")
     logging.info(
         "ENGINE_CONFIG "
         f"symbol={SYMBOL} "
         f"drop_pct={DROP_PCT:.6f} "
         f"order_qty={ORDER_QTY} "
         f"poll_sec={POLL_SEC} "
+        f"fill_timeout_sec={FILL_TIMEOUT_SEC} "
+        f"fill_poll_sec={FILL_POLL_SEC} "
         f"max_buys_per_tick={MAX_BUYS_PER_TICK} "
         f"dry_run={DRY_RUN} "
         f"log_position_changes={LOG_POSITION_CHANGES}"
@@ -90,7 +127,6 @@ def main():
     # Initialize anchor/next_trigger from live price
     anchor_price = get_live_price(SYMBOL)
     next_trigger = anchor_price * (1.0 - DROP_PCT)
-
     logging.info(f"ANCHOR_INIT anchor={anchor_price:.2f} next_trigger={next_trigger:.2f}")
 
     # Initialize last_pos_qty
@@ -116,11 +152,7 @@ def main():
                     last_pos_qty = pos_qty
 
             last_price = get_live_price(SYMBOL)
-
-            logging.info(
-                f"PRICE {SYMBOL} "
-                f"last={last_price:.2f} anchor={anchor_price:.2f} next_trigger={next_trigger:.2f}"
-            )
+            logging.info(f"PRICE {SYMBOL} last={last_price:.2f} anchor={anchor_price:.2f} next_trigger={next_trigger:.2f}")
 
             # ---- Ladder trigger check with catch-up ----
             buys_this_tick = 0
@@ -129,35 +161,56 @@ def main():
                 buy_count += 1
                 buys_this_tick += 1
 
+                trigger_price = next_trigger  # capture the rung that fired
+
                 if DRY_RUN:
                     logging.info(
                         f"SIM_BUY trigger_hit #{buy_count} "
-                        f"last={last_price:.2f} trigger={next_trigger:.2f} "
+                        f"last={last_price:.2f} trigger={trigger_price:.2f} "
                         f"anchor_before={anchor_price:.2f} drop_pct={DROP_PCT:.6f} "
                         f"qty={ORDER_QTY} dry_run={DRY_RUN}"
                     )
                 else:
+                    # 1) Submit
                     logging.info(
-                        f"BUY trigger_hit #{buy_count} "
-                        f"last={last_price:.2f} trigger={next_trigger:.2f} "
+                        f"BUY_SUBMIT trigger_hit #{buy_count} "
+                        f"last={last_price:.2f} trigger={trigger_price:.2f} "
                         f"anchor_before={anchor_price:.2f} drop_pct={DROP_PCT:.6f} "
-                        f"qty={ORDER_QTY} submitting market order"
+                        f"qty={ORDER_QTY} type=market tif=day"
                     )
-                    api.submit_order(
-                        symbol=SYMBOL,
-                        qty=ORDER_QTY,
-                        side="buy",
-                        type="market",
-                        time_in_force="day",
+                    order = submit_market_buy(SYMBOL, ORDER_QTY)
+
+                    logging.info(
+                        f"BUY_SUBMITTED id={order.id} status={order.status} "
+                        f"qty={getattr(order, 'qty', None)}"
                     )
+
+                    # 2) Wait for fill (or terminal/timeout)
+                    final_order = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
+
+                    status = (final_order.status or "").lower()
+                    filled_qty = getattr(final_order, "filled_qty", None)
+                    filled_avg_price = getattr(final_order, "filled_avg_price", None)
+
+                    logging.info(
+                        f"BUY_RESULT id={final_order.id} status={final_order.status} "
+                        f"filled_qty={filled_qty} filled_avg_price={filled_avg_price}"
+                    )
+
+                    if status != "filled":
+                        logging.warning(
+                            f"BUY_NOT_FILLED id={final_order.id} status={final_order.status} "
+                            f"(timeout={FILL_TIMEOUT_SEC}s poll={FILL_POLL_SEC}s)"
+                        )
 
                 # After the BUY, anchor becomes the rung that fired
-                anchor_price = next_trigger
+                anchor_price = trigger_price
                 next_trigger = anchor_price * (1.0 - DROP_PCT)
 
-                logging.info(
-                    f"ANCHOR_ADVANCE anchor_now={anchor_price:.2f} next_trigger={next_trigger:.2f}"
-                )
+                logging.info(f"ANCHOR_ADVANCE anchor_now={anchor_price:.2f} next_trigger={next_trigger:.2f}")
+
+                # Refresh price so "catch-up" can continue accurately
+                last_price = get_live_price(SYMBOL)
 
             if last_price <= next_trigger and buys_this_tick >= MAX_BUYS_PER_TICK:
                 logging.warning(
