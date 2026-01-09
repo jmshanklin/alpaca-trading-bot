@@ -94,6 +94,30 @@ def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
             return o  # timeout: return last known state
 
         time.sleep(poll_sec)
+        
+def classify_position_change(prev_qty: float, new_qty: float, now_ts: float, last_bot_ts: float, grace_sec: float) -> str:
+    """
+    Returns a label describing what likely happened.
+    We can’t *prove* it was manual, but we can strongly infer when bot wasn’t acting.
+    """
+    if prev_qty == new_qty:
+        return "NO_CHANGE"
+
+    if new_qty == 0.0 and prev_qty > 0.0:
+        # If the bot hasn’t just acted, this is very likely a manual liquidation / external close.
+        if (now_ts - last_bot_ts) > grace_sec:
+            return "MANUAL_LIQUIDATION_SUSPECTED"
+        return "POSITION_WENT_FLAT_AFTER_BOT_ACTION"
+
+    if new_qty < prev_qty:
+        if (now_ts - last_bot_ts) > grace_sec:
+            return "EXTERNAL_REDUCTION_SUSPECTED"
+        return "REDUCTION_AFTER_BOT_ACTION"
+
+    if new_qty > prev_qty:
+        if (now_ts - last_bot_ts) > grace_sec:
+            return "EXTERNAL_INCREASE_SUSPECTED"
+        return "INCREASE_AFTER_BOT_ACTION"
 
 def main():
     logging.info(f"ENGINE_START drop_pct={DROP_PCT:.6f} dry_run={DRY_RUN} symbol={SYMBOL}")
@@ -115,7 +139,11 @@ def main():
     next_trigger = None
     buy_count = 0
     last_pos_qty = None
-
+    
+    # NEW: helps classify position changes
+    last_bot_action_ts = 0.0      # when the bot last submitted an order
+    BOT_ACTION_GRACE_SEC = 10.0   # position change within this window is probably from bot
+    
     # Wait for market open before initializing anchor
     while True:
         clock = api.get_clock()
@@ -147,8 +175,15 @@ def main():
                 pos_qty = get_position_qty(SYMBOL)
                 if last_pos_qty is None:
                     last_pos_qty = pos_qty
+                    logging.info(f"POSITION_INIT qty={last_pos_qty:.4f}")
                 elif pos_qty != last_pos_qty:
-                    logging.info(f"POSITION_CHANGE qty_from={last_pos_qty:.4f} qty_to={pos_qty:.4f}")
+                    now_ts = time.time()
+                    label = classify_position_change(last_pos_qty, pos_qty, now_ts, last_bot_action_ts, BOT_ACTION_GRACE_SEC)
+            
+                    logging.warning(
+                        f"POSITION_CHANGE label={label} qty_from={last_pos_qty:.4f} qty_to={pos_qty:.4f}"
+                    )
+            
                     last_pos_qty = pos_qty
 
             last_price = get_live_price(SYMBOL)
