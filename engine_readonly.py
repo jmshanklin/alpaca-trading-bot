@@ -65,7 +65,7 @@ ORDER_QTY = int(os.getenv("ORDER_QTY", "1"))
 # Polling for new closed bars
 POLL_SEC = float(os.getenv("POLL_SEC", "1.0"))
 
-# Fill logging (used when DRY_RUN=false and we submit orders)
+# Fill polling (used when DRY_RUN=false and we submit orders)
 FILL_TIMEOUT_SEC = float(os.getenv("FILL_TIMEOUT_SEC", "20"))
 FILL_POLL_SEC = float(os.getenv("FILL_POLL_SEC", "0.5"))
 
@@ -81,6 +81,12 @@ LOG_POSITION_CHANGES = os.getenv("LOG_POSITION_CHANGES", "true").strip().lower()
     "on",
 )
 
+# State save throttle (0 = save every processed bar)
+STATE_SAVE_SEC = float(os.getenv("STATE_SAVE_SEC", "0"))
+
+# SELL target above anchor: e.g. 0.0025 = +0.25%
+SELL_PCT = float(os.getenv("SELL_PCT", "0.0"))
+
 # Persistence
 STATE_PATH = resolve_state_path()
 
@@ -94,6 +100,12 @@ ALPACA_BASE_URL = (
 )
 
 SYMBOL = os.getenv("ENGINE_SYMBOL", "TSLA").upper()
+
+if not ALPACA_KEY_ID or not ALPACA_SECRET_KEY:
+    raise RuntimeError(
+        "Missing Alpaca credentials: set ALPACA_KEY_ID/ALPACA_SECRET_KEY "
+        "(or APCA_API_KEY_ID/APCA_API_SECRET_KEY)."
+    )
 
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
@@ -113,26 +125,73 @@ def load_state() -> dict:
     return {}
 
 
-def save_state(state: dict) -> None:
+def save_state(payload: dict) -> None:
     """Persist state to disk."""
     try:
         os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
         with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, sort_keys=True)
+            json.dump(payload, f, indent=2, sort_keys=True)
     except Exception as e:
         logging.warning(f"STATE_SAVE failed: {e}")
+
+
+def maybe_persist_state(state: dict, payload: dict) -> None:
+    """
+    Persist state, optionally throttled by STATE_SAVE_SEC.
+    Always updates the in-memory `state` dict.
+    """
+    state.update(payload)
+
+    if STATE_SAVE_SEC <= 0:
+        save_state(state)
+        state["_last_save_ts"] = time.time()
+        return
+
+    now_ts = time.time()
+    last_ts = float(state.get("_last_save_ts", 0.0))
+
+    if (now_ts - last_ts) >= STATE_SAVE_SEC:
+        save_state(state)
+        state["_last_save_ts"] = now_ts
 
 
 # =========================
 # Trading helpers
 # =========================
+def get_position(symbol: str):
+    """Return Alpaca position object or None."""
+    try:
+        return api.get_position(symbol)
+    except Exception:
+        return None
+
+
 def get_position_qty(symbol: str) -> float:
     """Returns current position qty (0.0 if no position)."""
+    pos = get_position(symbol)
+    if not pos:
+        return 0.0
     try:
-        pos = api.get_position(symbol)
         return float(pos.qty)
     except Exception:
         return 0.0
+
+
+def get_position_avg_entry(symbol: str):
+    """
+    Returns average entry price as float, or None if no position/unknown.
+    Alpaca uses avg_entry_price on the position object.
+    """
+    pos = get_position(symbol)
+    if not pos:
+        return None
+    avg = getattr(pos, "avg_entry_price", None)
+    if avg is None:
+        return None
+    try:
+        return float(avg)
+    except Exception:
+        return None
 
 
 def submit_market_buy(symbol: str, qty: int):
@@ -141,6 +200,17 @@ def submit_market_buy(symbol: str, qty: int):
         symbol=symbol,
         qty=qty,
         side="buy",
+        type="market",
+        time_in_force="day",
+    )
+
+
+def submit_market_sell(symbol: str, qty: int):
+    """Submit a market sell and return the Alpaca Order object."""
+    return api.submit_order(
+        symbol=symbol,
+        qty=qty,
+        side="sell",
         type="market",
         time_in_force="day",
     )
@@ -190,11 +260,20 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
     return None
 
 
+def reset_group_state(state: dict) -> None:
+    """Reset group-related state after a full liquidation."""
+    state["group_anchor_close"] = None
+    state["last_red_buy_close"] = None
+    state["group_buy_count"] = 0
+
+
 # =========================
 # Main
 # =========================
 def main():
-    logging.info(f"ENGINE_START mode=RED_CLOSE_OPTION_2 dry_run={DRY_RUN} symbol={SYMBOL}")
+    logging.info(
+        f"ENGINE_START mode=RED_CLOSE_GROUP_SELL_ANCHOR_PCT dry_run={DRY_RUN} symbol={SYMBOL}"
+    )
     logging.info(
         "ENGINE_CONFIG "
         f"symbol={SYMBOL} "
@@ -205,16 +284,17 @@ def main():
         f"max_buys_per_tick={MAX_BUYS_PER_TICK} "
         f"log_position_changes={LOG_POSITION_CHANGES} "
         f"state_path={STATE_PATH} "
-        f"dry_run={DRY_RUN}"
+        f"state_save_sec={STATE_SAVE_SEC} "
+        f"sell_pct={SELL_PCT} "
+        f"dry_run={DRY_RUN} "
+        f"alpaca_base_url={ALPACA_BASE_URL}"
     )
 
     # ---- Load persisted state ----
     state = load_state()
-    last_bar_ts_iso = state.get("last_bar_ts")  # ISO string
-    last_red_buy_close = state.get("last_red_buy_close")  # float or None
-    buy_count = int(state.get("buy_count", 0))
 
-    # Convert last_bar_ts back to datetime (UTC)
+    # last processed bar
+    last_bar_ts_iso = state.get("last_bar_ts")  # ISO string
     last_bar_ts = None
     if last_bar_ts_iso:
         try:
@@ -224,9 +304,19 @@ def main():
         except Exception:
             last_bar_ts = None
 
+    # group state
+    group_anchor_close = state.get("group_anchor_close")  # float or None
+    last_red_buy_close = state.get("last_red_buy_close")  # float or None
+    buy_count_total = int(state.get("buy_count_total", 0))
+    group_buy_count = int(state.get("group_buy_count", 0))
+
     logging.info(
-        f"STATE_LOADED last_bar_ts={last_bar_ts_iso} "
-        f"last_red_buy_close={last_red_buy_close} buy_count={buy_count}"
+        "STATE_LOADED "
+        f"last_bar_ts={last_bar_ts_iso} "
+        f"group_anchor_close={group_anchor_close} "
+        f"last_red_buy_close={last_red_buy_close} "
+        f"buy_count_total={buy_count_total} "
+        f"group_buy_count={group_buy_count}"
     )
 
     # Position-change baseline
@@ -255,6 +345,14 @@ def main():
                     )
                     last_pos_qty = pos_qty
 
+                    # If position was externally liquidated, reset group anchors
+                    if pos_qty == 0.0:
+                        logging.info("MANUAL_LIQUIDATION_DETECTED resetting group state")
+                        reset_group_state(state)
+                        group_anchor_close = None
+                        last_red_buy_close = None
+                        group_buy_count = 0
+
             # Use Alpaca clock timestamp as "now" (UTC)
             now_utc = clock.timestamp
             if now_utc.tzinfo is None:
@@ -278,12 +376,101 @@ def main():
             c = float(b.c)
             is_red = c < o
 
+            # Pull avg entry for logging + comparisons (if any position)
+            pos_qty = get_position_qty(SYMBOL)
+            avg_entry = get_position_avg_entry(SYMBOL) if pos_qty > 0 else None
+
+            # Compute sell target if group exists
+            sell_target = None
+            if group_anchor_close is not None:
+                try:
+                    sell_target = float(group_anchor_close) * (1.0 + float(SELL_PCT))
+                except Exception:
+                    sell_target = None
+
+            # Log candle + anchor/target + avg entry comparison
             logging.info(
-                f"BAR_CLOSE {SYMBOL} t={bar_ts.isoformat()} O={o:.2f} C={c:.2f} red={is_red}"
+                f"BAR_CLOSE {SYMBOL} t={bar_ts.isoformat()} O={o:.2f} C={c:.2f} red={is_red} "
+                f"group_anchor={group_anchor_close} sell_target={sell_target} "
+                f"pos_qty={pos_qty:.0f} avg_entry={avg_entry}"
             )
+
+            if group_anchor_close is not None and avg_entry is not None:
+                try:
+                    anchor = float(group_anchor_close)
+                    diff_anchor = c - anchor
+                    diff_avg = c - float(avg_entry)
+                    logging.info(
+                        f"COMPARE close_to_anchor={diff_anchor:+.2f} close_to_avg_entry={diff_avg:+.2f} "
+                        f"(close={c:.2f} anchor={anchor:.2f} avg_entry={float(avg_entry):.2f})"
+                    )
+                except Exception:
+                    pass
 
             buys_this_tick = 0
 
+            # =========================
+            # SELL trigger (group liquidation)
+            # =========================
+            if group_anchor_close is not None and sell_target is not None:
+                if pos_qty > 0.0 and c >= float(sell_target):
+                    sell_qty = int(pos_qty)  # equities should be whole shares
+                    if sell_qty <= 0:
+                        logging.warning(
+                            f"SELL_SKIP invalid_qty pos_qty={pos_qty} computed_sell_qty={sell_qty}"
+                        )
+                    else:
+                        if DRY_RUN:
+                            logging.info(
+                                f"SIM_SELL_ALL trigger=CLOSE_AT_OR_ABOVE_TARGET "
+                                f"close={c:.2f} target={float(sell_target):.2f} "
+                                f"anchor={float(group_anchor_close):.2f} sell_pct={SELL_PCT} qty={sell_qty}"
+                            )
+                        else:
+                            logging.info(
+                                f"SELL_SIGNAL trigger=CLOSE_AT_OR_ABOVE_TARGET "
+                                f"close={c:.2f} target={float(sell_target):.2f} "
+                                f"anchor={float(group_anchor_close):.2f} sell_pct={SELL_PCT} qty={sell_qty}"
+                            )
+                            order = submit_market_sell(SYMBOL, sell_qty)
+                            logging.info(
+                                f"ORDER_SUBMITTED id={order.id} qty={sell_qty} type=market side=sell"
+                            )
+
+                            final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
+                            status = (final.status or "").lower()
+                            avg_fill = getattr(final, "filled_avg_price", None)
+                            filled_qty = getattr(final, "filled_qty", None)
+
+                            logging.info(
+                                f"ORDER_FINAL id={order.id} status={status} "
+                                f"filled_qty={filled_qty} avg_fill_price={avg_fill}"
+                            )
+
+                        logging.info("GROUP_RESET after sell-all")
+                        reset_group_state(state)
+                        group_anchor_close = None
+                        last_red_buy_close = None
+                        group_buy_count = 0
+
+                        # After a sell, continue to persist and move on
+                        last_bar_ts = bar_ts
+                        persist_payload = {
+                            "last_bar_ts": last_bar_ts.isoformat(),
+                            "group_anchor_close": group_anchor_close,
+                            "last_red_buy_close": last_red_buy_close,
+                            "buy_count_total": buy_count_total,
+                            "group_buy_count": group_buy_count,
+                            "symbol": SYMBOL,
+                        }
+                        maybe_persist_state(state, persist_payload)
+
+                        time.sleep(POLL_SEC)
+                        continue
+
+            # =========================
+            # BUY trigger (red candle close logic)
+            # =========================
             if is_red:
                 if last_red_buy_close is None:
                     should_buy = True
@@ -291,7 +478,9 @@ def main():
                 else:
                     should_buy = c < float(last_red_buy_close)
                     reason = (
-                        "LOWER_THAN_LAST_RED_BUY" if should_buy else "NOT_LOWER_THAN_LAST_RED_BUY"
+                        "LOWER_THAN_LAST_RED_BUY"
+                        if should_buy
+                        else "NOT_LOWER_THAN_LAST_RED_BUY"
                     )
 
                 if should_buy:
@@ -301,18 +490,30 @@ def main():
                             f"bar_ts={bar_ts.isoformat()} close={c:.2f}"
                         )
                     else:
-                        buy_count += 1
+                        buy_count_total += 1
+                        group_buy_count += 1
                         buys_this_tick += 1
+
+                        # Set the group anchor on the very first buy of the group
+                        if group_anchor_close is None:
+                            group_anchor_close = float(c)
+                            logging.info(
+                                f"GROUP_ANCHOR_SET group_anchor_close={group_anchor_close:.2f}"
+                            )
 
                         if DRY_RUN:
                             logging.info(
-                                f"SIM_BUY #{buy_count} reason={reason} "
-                                f"close={c:.2f} last_red_buy_close={last_red_buy_close} qty={ORDER_QTY}"
+                                f"SIM_BUY total#{buy_count_total} group#{group_buy_count} "
+                                f"reason={reason} close={c:.2f} "
+                                f"group_anchor={group_anchor_close} last_red_buy_close={last_red_buy_close} "
+                                f"qty={ORDER_QTY}"
                             )
                         else:
                             logging.info(
-                                f"BUY_SIGNAL #{buy_count} reason={reason} "
-                                f"close={c:.2f} last_red_buy_close={last_red_buy_close} qty={ORDER_QTY}"
+                                f"BUY_SIGNAL total#{buy_count_total} group#{group_buy_count} "
+                                f"reason={reason} close={c:.2f} "
+                                f"group_anchor={group_anchor_close} last_red_buy_close={last_red_buy_close} "
+                                f"qty={ORDER_QTY}"
                             )
                             order = submit_market_buy(SYMBOL, ORDER_QTY)
                             logging.info(
@@ -321,7 +522,6 @@ def main():
 
                             final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
                             status = (final.status or "").lower()
-
                             avg_fill = getattr(final, "filled_avg_price", None)
                             filled_qty = getattr(final, "filled_qty", None)
 
@@ -340,16 +540,17 @@ def main():
                         f"RED_SKIP reason={reason} close={c:.2f} last_red_buy_close={last_red_buy_close}"
                     )
 
-            # Update last processed bar and persist
+            # Update last processed bar and persist (optionally throttled)
             last_bar_ts = bar_ts
-            save_state(
-                {
-                    "last_bar_ts": last_bar_ts.isoformat(),
-                    "last_red_buy_close": last_red_buy_close,
-                    "buy_count": buy_count,
-                    "symbol": SYMBOL,
-                }
-            )
+            persist_payload = {
+                "last_bar_ts": last_bar_ts.isoformat(),
+                "group_anchor_close": group_anchor_close,
+                "last_red_buy_close": last_red_buy_close,
+                "buy_count_total": buy_count_total,
+                "group_buy_count": group_buy_count,
+                "symbol": SYMBOL,
+            }
+            maybe_persist_state(state, persist_payload)
 
             time.sleep(POLL_SEC)
 
