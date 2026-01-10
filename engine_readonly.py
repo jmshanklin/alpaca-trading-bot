@@ -86,6 +86,9 @@ STATE_SAVE_SEC = float(os.getenv("STATE_SAVE_SEC", "0"))
 
 # SELL target above anchor: e.g. 0.01 = +1%
 SELL_PCT = float(os.getenv("SELL_PCT", "0.0"))
+RESET_SIM_OWNED_ON_START = os.getenv(
+    "RESET_SIM_OWNED_ON_START", "false"
+).strip().lower() in ("1", "true", "yes", "y", "on")
 
 # Persistence
 STATE_PATH = resolve_state_path()
@@ -109,7 +112,6 @@ if not ALPACA_KEY_ID or not ALPACA_SECRET_KEY:
 
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
-
 # =========================
 # State I/O
 # =========================
@@ -132,7 +134,6 @@ def save_state(payload: dict) -> None:
     except Exception as e:
         logging.warning(f"STATE_SAVE failed: {e}")
 
-
 def maybe_persist_state(state: dict, payload: dict) -> None:
     state.update(payload)
 
@@ -147,7 +148,6 @@ def maybe_persist_state(state: dict, payload: dict) -> None:
         save_state(state)
         state["_last_save_ts"] = now_ts
 
-
 # =========================
 # Trading helpers
 # =========================
@@ -157,7 +157,6 @@ def get_position(symbol: str):
     except Exception:
         return None
 
-
 def get_position_qty(symbol: str) -> float:
     pos = get_position(symbol)
     if not pos:
@@ -166,7 +165,6 @@ def get_position_qty(symbol: str) -> float:
         return float(pos.qty)
     except Exception:
         return 0.0
-
 
 def get_position_avg_entry(symbol: str):
     pos = get_position(symbol)
@@ -180,7 +178,6 @@ def get_position_avg_entry(symbol: str):
     except Exception:
         return None
 
-
 def submit_market_buy(symbol: str, qty: int):
     return api.submit_order(
         symbol=symbol,
@@ -189,7 +186,6 @@ def submit_market_buy(symbol: str, qty: int):
         type="market",
         time_in_force="day",
     )
-
 
 def submit_market_sell(symbol: str, qty: int):
     return api.submit_order(
@@ -299,6 +295,15 @@ def main():
     if "strategy_owned_qty" not in state:
         state["strategy_owned_qty"] = 0
     if "sim_owned_qty" not in state:
+        state["sim_owned_qty"] = 0
+    
+    # Optional: reset simulated ownership on startup (DRY_RUN only)
+    if DRY_RUN and RESET_SIM_OWNED_ON_START:
+        if state.get("sim_owned_qty", 0) != 0:
+            logging.info(
+                f"RESET_SIM_OWNED_ON_START enabled → sim_owned_qty "
+                f"{state.get('sim_owned_qty')} → 0"
+            )
         state["sim_owned_qty"] = 0
 
     logging.info(
