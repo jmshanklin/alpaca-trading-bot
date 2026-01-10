@@ -11,6 +11,7 @@ import alpaca_trade_api as tradeapi
 # Logging in Central Time
 # =========================
 CT = ZoneInfo("America/Chicago")
+ET = ZoneInfo("America/New_York")
 
 
 class CTFormatter(logging.Formatter):
@@ -69,7 +70,7 @@ POLL_SEC = float(os.getenv("POLL_SEC", "1.0"))
 FILL_TIMEOUT_SEC = float(os.getenv("FILL_TIMEOUT_SEC", "20"))
 FILL_POLL_SEC = float(os.getenv("FILL_POLL_SEC", "0.5"))
 
-# Safety cap
+# Safety cap per loop tick
 MAX_BUYS_PER_TICK = int(os.getenv("MAX_BUYS_PER_TICK", "1"))
 
 # Optional: log manual liquidation / position changes
@@ -86,9 +87,22 @@ STATE_SAVE_SEC = float(os.getenv("STATE_SAVE_SEC", "0"))
 
 # SELL target above anchor: e.g. 0.01 = +1%
 SELL_PCT = float(os.getenv("SELL_PCT", "0.0"))
+
+# Reset simulated owned qty on startup (DRY_RUN only)
 RESET_SIM_OWNED_ON_START = os.getenv(
     "RESET_SIM_OWNED_ON_START", "false"
 ).strip().lower() in ("1", "true", "yes", "y", "on")
+
+# -------- LIVE v1 Safety Rails (Option B) --------
+LIVE_TRADING_CONFIRM = os.getenv("LIVE_TRADING_CONFIRM", "").strip()
+KILL_SWITCH = os.getenv("KILL_SWITCH", "false").strip().lower() in ("1", "true", "yes", "y", "on")
+
+MAX_DOLLARS_PER_BUY = float(os.getenv("MAX_DOLLARS_PER_BUY", "0"))  # 0 disables
+MAX_POSITION_QTY = int(os.getenv("MAX_POSITION_QTY", "0"))          # 0 disables
+MAX_BUYS_PER_DAY = int(os.getenv("MAX_BUYS_PER_DAY", "0"))          # 0 disables
+
+TRADE_START_ET = os.getenv("TRADE_START_ET", "").strip()  # e.g. "09:35" (blank disables)
+TRADE_END_ET = os.getenv("TRADE_END_ET", "").strip()      # e.g. "15:55" (blank disables)
 
 # Persistence
 STATE_PATH = resolve_state_path()
@@ -112,6 +126,55 @@ if not ALPACA_KEY_ID or not ALPACA_SECRET_KEY:
 
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
+
+# =========================
+# Live/paper detection + time helpers
+# =========================
+def is_live_endpoint(url: str) -> bool:
+    """
+    True for Alpaca LIVE endpoint, False for paper.
+    We treat anything containing 'paper-api' as paper.
+    """
+    u = (url or "").lower()
+    if "paper-api" in u:
+        return False
+    # Alpaca live is typically api.alpaca.markets
+    return "api.alpaca.markets" in u
+
+
+def parse_hhmm(s: str):
+    """Return (hour, minute) or None if blank/invalid."""
+    try:
+        if not s:
+            return None
+        hh, mm = s.split(":")
+        return int(hh), int(mm)
+    except Exception:
+        return None
+
+
+def in_trade_window_et(now_utc: datetime) -> bool:
+    """
+    If TRADE_START_ET/TRADE_END_ET are set, require now ET to be inside window.
+    If either is blank/invalid, window is disabled (always True).
+    """
+    start = parse_hhmm(TRADE_START_ET)
+    end = parse_hhmm(TRADE_END_ET)
+    if not start or not end:
+        return True
+
+    now_et = now_utc.astimezone(ET)
+    mins = now_et.hour * 60 + now_et.minute
+    start_m = start[0] * 60 + start[1]
+    end_m = end[0] * 60 + end[1]
+    return start_m <= mins <= end_m
+
+
+def et_date_str(now_utc: datetime) -> str:
+    """YYYY-MM-DD in ET."""
+    return now_utc.astimezone(ET).date().isoformat()
+
+
 # =========================
 # State I/O
 # =========================
@@ -134,6 +197,7 @@ def save_state(payload: dict) -> None:
     except Exception as e:
         logging.warning(f"STATE_SAVE failed: {e}")
 
+
 def maybe_persist_state(state: dict, payload: dict) -> None:
     state.update(payload)
 
@@ -148,6 +212,7 @@ def maybe_persist_state(state: dict, payload: dict) -> None:
         save_state(state)
         state["_last_save_ts"] = now_ts
 
+
 # =========================
 # Trading helpers
 # =========================
@@ -157,6 +222,7 @@ def get_position(symbol: str):
     except Exception:
         return None
 
+
 def get_position_qty(symbol: str) -> float:
     pos = get_position(symbol)
     if not pos:
@@ -165,6 +231,7 @@ def get_position_qty(symbol: str) -> float:
         return float(pos.qty)
     except Exception:
         return 0.0
+
 
 def get_position_avg_entry(symbol: str):
     pos = get_position(symbol)
@@ -178,6 +245,7 @@ def get_position_avg_entry(symbol: str):
     except Exception:
         return None
 
+
 def submit_market_buy(symbol: str, qty: int):
     return api.submit_order(
         symbol=symbol,
@@ -186,6 +254,7 @@ def submit_market_buy(symbol: str, qty: int):
         type="market",
         time_in_force="day",
     )
+
 
 def submit_market_sell(symbol: str, qty: int):
     return api.submit_order(
@@ -235,7 +304,7 @@ def get_owned_qty(state: dict) -> int:
     """
     Strategy-owned qty:
     - DRY_RUN uses sim_owned_qty
-    - LIVE uses strategy_owned_qty
+    - DRY_RUN=false uses strategy_owned_qty
     """
     key = "sim_owned_qty" if DRY_RUN else "strategy_owned_qty"
     try:
@@ -253,6 +322,8 @@ def set_owned_qty(state: dict, new_qty: int) -> None:
 # Main
 # =========================
 def main():
+    live_endpoint = is_live_endpoint(ALPACA_BASE_URL)
+
     logging.info(
         f"ENGINE_START mode=RED_CLOSE_GROUP_SELL_ANCHOR_PCT dry_run={DRY_RUN} symbol={SYMBOL}"
     )
@@ -268,9 +339,24 @@ def main():
         f"state_path={STATE_PATH} "
         f"state_save_sec={STATE_SAVE_SEC} "
         f"sell_pct={SELL_PCT} "
+        f"reset_sim_owned_on_start={RESET_SIM_OWNED_ON_START} "
+        f"kill_switch={KILL_SWITCH} "
+        f"max_dollars_per_buy={MAX_DOLLARS_PER_BUY} "
+        f"max_position_qty={MAX_POSITION_QTY} "
+        f"max_buys_per_day={MAX_BUYS_PER_DAY} "
+        f"trade_start_et={TRADE_START_ET} "
+        f"trade_end_et={TRADE_END_ET} "
         f"dry_run={DRY_RUN} "
-        f"alpaca_base_url={ALPACA_BASE_URL}"
+        f"alpaca_base_url={ALPACA_BASE_URL} "
+        f"alpaca_is_live_endpoint={live_endpoint}"
     )
+
+    # Live trading confirmation gate (ONLY live endpoint + DRY_RUN=false)
+    if (not DRY_RUN) and live_endpoint:
+        if LIVE_TRADING_CONFIRM != "I_UNDERSTAND":
+            raise RuntimeError(
+                "LIVE trading blocked: set LIVE_TRADING_CONFIRM=I_UNDERSTAND to enable live orders."
+            )
 
     state = load_state()
 
@@ -291,19 +377,21 @@ def main():
     buy_count_total = int(state.get("buy_count_total", 0))
     group_buy_count = int(state.get("group_buy_count", 0))
 
-    # owned tracking (both can exist; we only use the appropriate one)
-    if "strategy_owned_qty" not in state:
-        state["strategy_owned_qty"] = 0
-    if "sim_owned_qty" not in state:
-        state["sim_owned_qty"] = 0
-    
+    # owned tracking (both can exist)
+    state.setdefault("strategy_owned_qty", 0)
+    state.setdefault("sim_owned_qty", 0)
+
+    # Daily buy limiter (ET day)
+    state.setdefault("buys_today_et", 0)
+    state.setdefault("buys_today_date_et", None)
+
     # Optional: reset simulated ownership on startup (DRY_RUN only)
     if DRY_RUN and RESET_SIM_OWNED_ON_START:
-        if state.get("sim_owned_qty", 0) != 0:
-            logging.info(
-                f"RESET_SIM_OWNED_ON_START enabled → sim_owned_qty "
-                f"{state.get('sim_owned_qty')} → 0"
-            )
+        old_sim = int(state.get("sim_owned_qty", 0))
+        if old_sim != 0:
+            logging.info(f"RESET_SIM_OWNED_ON_START enabled → sim_owned_qty {old_sim} → 0")
+        else:
+            logging.info("RESET_SIM_OWNED_ON_START enabled → sim_owned_qty already 0")
         state["sim_owned_qty"] = 0
 
     logging.info(
@@ -314,7 +402,9 @@ def main():
         f"buy_count_total={buy_count_total} "
         f"group_buy_count={group_buy_count} "
         f"strategy_owned_qty={int(state.get('strategy_owned_qty', 0))} "
-        f"sim_owned_qty={int(state.get('sim_owned_qty', 0))}"
+        f"sim_owned_qty={int(state.get('sim_owned_qty', 0))} "
+        f"buys_today_date_et={state.get('buys_today_date_et')} "
+        f"buys_today_et={int(state.get('buys_today_et', 0))}"
     )
 
     # Position-change baseline
@@ -332,27 +422,39 @@ def main():
                 time.sleep(30)
                 continue
 
+            # Use Alpaca clock timestamp as "now" (UTC)
+            now_utc = clock.timestamp
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+            # ET day rollover (daily buy limiter)
+            today_et = et_date_str(now_utc)
+            if state.get("buys_today_date_et") != today_et:
+                state["buys_today_date_et"] = today_et
+                state["buys_today_et"] = 0
+                logging.info(f"DAY_ROLLOVER_ET date={today_et} buys_today_et reset to 0")
+
             # Optional: detect manual position changes and keep owned qty sane
             if LOG_POSITION_CHANGES:
-                pos_qty = get_position_qty(SYMBOL)
+                pos_qty_now = get_position_qty(SYMBOL)
                 if last_pos_qty is None:
-                    last_pos_qty = pos_qty
-                elif pos_qty != last_pos_qty:
+                    last_pos_qty = pos_qty_now
+                elif pos_qty_now != last_pos_qty:
                     logging.info(
-                        f"POSITION_CHANGE qty_from={last_pos_qty:.4f} qty_to={pos_qty:.4f}"
+                        f"POSITION_CHANGE qty_from={last_pos_qty:.4f} qty_to={pos_qty_now:.4f}"
                     )
-                    last_pos_qty = pos_qty
+                    last_pos_qty = pos_qty_now
 
                 # Clamp owned qty so we never claim to own more than we hold
-                owned = get_owned_qty(state)
-                if int(pos_qty) < owned:
+                owned_now = get_owned_qty(state)
+                if int(pos_qty_now) < owned_now:
                     logging.warning(
-                        f"OWNED_CLAMP position_qty={int(pos_qty)} owned_qty={owned} -> owned_qty={int(pos_qty)}"
+                        f"OWNED_CLAMP position_qty={int(pos_qty_now)} owned_qty={owned_now} -> owned_qty={int(pos_qty_now)}"
                     )
-                    set_owned_qty(state, int(pos_qty))
+                    set_owned_qty(state, int(pos_qty_now))
 
                 # If externally liquidated to zero, reset group + owned (for current mode)
-                if pos_qty == 0.0:
+                if pos_qty_now == 0.0:
                     if get_owned_qty(state) != 0:
                         logging.info("LIQUIDATION_DETECTED setting owned_qty=0 for current mode")
                         set_owned_qty(state, 0)
@@ -362,11 +464,6 @@ def main():
                         group_anchor_close = None
                         last_red_buy_close = None
                         group_buy_count = 0
-
-            # Use Alpaca clock timestamp as "now" (UTC)
-            now_utc = clock.timestamp
-            if now_utc.tzinfo is None:
-                now_utc = now_utc.replace(tzinfo=timezone.utc)
 
             b = pick_latest_closed_bar(SYMBOL, now_utc)
             if b is None:
@@ -398,7 +495,8 @@ def main():
             logging.info(
                 f"BAR_CLOSE {SYMBOL} t={bar_ts.isoformat()} O={o:.2f} C={c:.2f} red={is_red} "
                 f"group_anchor={group_anchor_close} sell_target={sell_target} "
-                f"pos_qty={int(pos_qty)} avg_entry={avg_entry} owned_qty={owned_qty}"
+                f"pos_qty={int(pos_qty)} avg_entry={avg_entry} owned_qty={owned_qty} "
+                f"buys_today_et={int(state.get('buys_today_et', 0))}"
             )
 
             if group_anchor_close is not None and avg_entry is not None:
@@ -415,6 +513,7 @@ def main():
 
             # =========================
             # SELL trigger (sell ONLY strategy-owned shares)
+            # NOTE: KILL_SWITCH does NOT block sells (sells reduce risk).
             # =========================
             if group_anchor_close is not None and sell_target is not None:
                 if int(pos_qty) > 0 and owned_qty > 0 and c >= float(sell_target):
@@ -426,7 +525,6 @@ def main():
                             f"close={c:.2f} target={float(sell_target):.2f} anchor={float(group_anchor_close):.2f} "
                             f"sell_pct={SELL_PCT} sell_qty={sell_qty} owned_qty={owned_qty} pos_qty={int(pos_qty)}"
                         )
-                        # simulate position reduction for owned shares only
                         set_owned_qty(state, owned_qty - sell_qty)
                     else:
                         logging.info(
@@ -448,7 +546,6 @@ def main():
                             f"ORDER_FINAL id={order.id} status={status} filled_qty={filled_qty} avg_fill_price={avg_fill}"
                         )
 
-                        # Decrement owned by actual filled qty when possible
                         dec = 0
                         try:
                             dec = int(float(filled_qty)) if filled_qty is not None else sell_qty
@@ -456,7 +553,6 @@ def main():
                             dec = sell_qty
                         set_owned_qty(state, owned_qty - dec)
 
-                    # Reset group after strategy-owned liquidation
                     logging.info("GROUP_RESET after owned sell")
                     reset_group_state(state)
                     group_anchor_close = None
@@ -474,6 +570,38 @@ def main():
                     should_buy = c < float(last_red_buy_close)
                     reason = "LOWER_THAN_LAST_RED_BUY" if should_buy else "NOT_LOWER_THAN_LAST_RED_BUY"
 
+                # ---- Safety rails (BUY side) ----
+                if should_buy and KILL_SWITCH:
+                    logging.warning("BUY_BLOCKED KILL_SWITCH active (buys disabled; sells allowed).")
+                    should_buy = False
+
+                if should_buy and (not in_trade_window_et(now_utc)):
+                    logging.info("BUY_BLOCKED outside trade window (ET).")
+                    should_buy = False
+
+                if should_buy and MAX_BUYS_PER_DAY > 0:
+                    if int(state.get("buys_today_et", 0)) >= MAX_BUYS_PER_DAY:
+                        logging.warning(f"BUY_BLOCKED max buys per ET day reached: {MAX_BUYS_PER_DAY}")
+                        should_buy = False
+
+                if should_buy and MAX_POSITION_QTY > 0:
+                    current_pos = int(get_position_qty(SYMBOL))
+                    if current_pos + int(ORDER_QTY) > MAX_POSITION_QTY:
+                        logging.warning(
+                            f"BUY_BLOCKED would exceed MAX_POSITION_QTY={MAX_POSITION_QTY} "
+                            f"(current_pos={current_pos}, order_qty={ORDER_QTY})"
+                        )
+                        should_buy = False
+
+                if should_buy and MAX_DOLLARS_PER_BUY > 0:
+                    est_cost = float(c) * int(ORDER_QTY)  # close used as estimate
+                    if est_cost > MAX_DOLLARS_PER_BUY:
+                        logging.warning(
+                            f"BUY_BLOCKED est_cost=${est_cost:.2f} exceeds MAX_DOLLARS_PER_BUY=${MAX_DOLLARS_PER_BUY:.2f}"
+                        )
+                        should_buy = False
+
+                # ---- Execute buy decision ----
                 if should_buy:
                     if buys_this_tick >= MAX_BUYS_PER_TICK:
                         logging.warning(
@@ -493,8 +621,13 @@ def main():
                                 f"SIM_BUY total#{buy_count_total} group#{group_buy_count} reason={reason} "
                                 f"close={c:.2f} qty={ORDER_QTY}"
                             )
-                            # simulate owned qty increase
                             set_owned_qty(state, get_owned_qty(state) + ORDER_QTY)
+                            # Count only FILLED buys toward the daily limit
+                            if status == "filled":
+                                state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
+                            else:
+                                logging.warning(f"BUY_NOT_COUNTED buys_today_et unchanged because status={status}")
+
                         else:
                             logging.info(
                                 f"BUY_SIGNAL total#{buy_count_total} group#{group_buy_count} reason={reason} "
@@ -521,9 +654,11 @@ def main():
                                 inc = ORDER_QTY
                             set_owned_qty(state, get_owned_qty(state) + inc)
 
+                            # Count a buy for the day if we actually attempted the buy (fills may vary).
+                            state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
+
                         last_red_buy_close = float(c)
                         logging.info(f"RED_BUY_MEMORY_UPDATE last_red_buy_close={last_red_buy_close:.2f}")
-
                 else:
                     logging.info(
                         f"RED_SKIP reason={reason} close={c:.2f} last_red_buy_close={last_red_buy_close}"
@@ -539,6 +674,8 @@ def main():
                 "group_buy_count": group_buy_count,
                 "strategy_owned_qty": int(state.get("strategy_owned_qty", 0)),
                 "sim_owned_qty": int(state.get("sim_owned_qty", 0)),
+                "buys_today_date_et": state.get("buys_today_date_et"),
+                "buys_today_et": int(state.get("buys_today_et", 0)),
                 "symbol": SYMBOL,
             }
             maybe_persist_state(state, payload)
