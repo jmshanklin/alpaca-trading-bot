@@ -2,10 +2,15 @@ import os
 import time
 import json
 import logging
+import hashlib
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import alpaca_trade_api as tradeapi
+
+# Postgres (for resilient v1 state + leader lock)
+import psycopg2
+from psycopg2.extras import Json
 
 # =========================
 # Logging in Central Time
@@ -28,7 +33,7 @@ logger.handlers = [handler]
 
 
 # =========================
-# Persistence helpers
+# Persistence helpers (disk fallback)
 # =========================
 def resolve_state_path() -> str:
     """
@@ -104,7 +109,7 @@ MAX_BUYS_PER_DAY = int(os.getenv("MAX_BUYS_PER_DAY", "0"))          # 0 disables
 TRADE_START_ET = os.getenv("TRADE_START_ET", "").strip()  # e.g. "09:35" (blank disables)
 TRADE_END_ET = os.getenv("TRADE_END_ET", "").strip()      # e.g. "15:55" (blank disables)
 
-# Persistence
+# Persistence (disk fallback)
 STATE_PATH = resolve_state_path()
 
 # Alpaca connection
@@ -126,6 +131,11 @@ if not ALPACA_KEY_ID or not ALPACA_SECRET_KEY:
 
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
+# -------- Postgres state + leader lock (v1 resilient) --------
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+LEADER_LOCK_KEY = os.getenv("LEADER_LOCK_KEY", f"{SYMBOL}_ENGINE_V1").strip()
+STANDBY_POLL_SEC = float(os.getenv("STANDBY_POLL_SEC", "2"))
+
 
 # =========================
 # Live/paper detection + time helpers
@@ -138,7 +148,6 @@ def is_live_endpoint(url: str) -> bool:
     u = (url or "").lower()
     if "paper-api" in u:
         return False
-    # Alpaca live is typically api.alpaca.markets
     return "api.alpaca.markets" in u
 
 
@@ -176,9 +185,71 @@ def et_date_str(now_utc: datetime) -> str:
 
 
 # =========================
-# State I/O
+# Postgres state + leader lock
 # =========================
-def load_state() -> dict:
+def db_enabled() -> bool:
+    return bool(DATABASE_URL)
+
+
+def db_connect():
+    if not DATABASE_URL:
+        raise RuntimeError("Missing DATABASE_URL env var for Postgres.")
+    conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    conn.autocommit = True
+    return conn
+
+
+def db_init(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS engine_state (
+                id TEXT PRIMARY KEY,
+                state JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+
+
+def _lock_int64_from_key(key: str) -> int:
+    h = hashlib.sha256(key.encode("utf-8")).digest()
+    return int.from_bytes(h[:8], "big", signed=False) % (2**63 - 1)
+
+
+def try_acquire_leader_lock(conn, lock_key: str) -> bool:
+    lock_id = _lock_int64_from_key(lock_key)
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s);", (lock_id,))
+        return bool(cur.fetchone()[0])
+
+
+def load_state_db(conn, state_id: str) -> dict:
+    with conn.cursor() as cur:
+        cur.execute("SELECT state FROM engine_state WHERE id=%s;", (state_id,))
+        row = cur.fetchone()
+        if not row:
+            return {}
+        return row[0] or {}
+
+
+def save_state_db(conn, state_id: str, state: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO engine_state (id, state, updated_at)
+            VALUES (%s, %s, now())
+            ON CONFLICT (id)
+            DO UPDATE SET state = EXCLUDED.state, updated_at = now();
+            """,
+            (state_id, Json(state)),
+        )
+
+
+# =========================
+# Disk state (fallback)
+# =========================
+def load_state_disk() -> dict:
     try:
         if os.path.exists(STATE_PATH):
             with open(STATE_PATH, "r", encoding="utf-8") as f:
@@ -189,7 +260,7 @@ def load_state() -> dict:
     return {}
 
 
-def save_state(payload: dict) -> None:
+def save_state_disk(payload: dict) -> None:
     try:
         os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
         with open(STATE_PATH, "w", encoding="utf-8") as f:
@@ -198,19 +269,32 @@ def save_state(payload: dict) -> None:
         logging.warning(f"STATE_SAVE failed: {e}")
 
 
-def maybe_persist_state(state: dict, payload: dict) -> None:
+def maybe_persist_state(state: dict, payload: dict, *, db_conn=None, state_id: str = "") -> None:
+    """
+    Update in-memory state and persist with STATE_SAVE_SEC throttle.
+    Saves to DB if db_conn + state_id are provided, else saves to disk.
+    """
     state.update(payload)
 
+    # Throttle logic
+    should_save = False
     if STATE_SAVE_SEC <= 0:
-        save_state(state)
+        should_save = True
         state["_last_save_ts"] = time.time()
+    else:
+        now_ts = time.time()
+        last_ts = float(state.get("_last_save_ts", 0.0))
+        if (now_ts - last_ts) >= STATE_SAVE_SEC:
+            should_save = True
+            state["_last_save_ts"] = now_ts
+
+    if not should_save:
         return
 
-    now_ts = time.time()
-    last_ts = float(state.get("_last_save_ts", 0.0))
-    if (now_ts - last_ts) >= STATE_SAVE_SEC:
-        save_state(state)
-        state["_last_save_ts"] = now_ts
+    if db_conn is not None and state_id:
+        save_state_db(db_conn, state_id, state)
+    else:
+        save_state_disk(state)
 
 
 # =========================
@@ -268,8 +352,10 @@ def submit_market_sell(symbol: str, qty: int):
 
 def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
     start = time.time()
+    last = None
     while True:
         o = api.get_order(order_id)
+        last = o
         status = (o.status or "").lower()
         if status in ("filled", "canceled", "rejected", "expired"):
             return o
@@ -348,7 +434,9 @@ def main():
         f"trade_end_et={TRADE_END_ET} "
         f"dry_run={DRY_RUN} "
         f"alpaca_base_url={ALPACA_BASE_URL} "
-        f"alpaca_is_live_endpoint={live_endpoint}"
+        f"alpaca_is_live_endpoint={live_endpoint} "
+        f"db_enabled={db_enabled()} "
+        f"leader_lock_key={LEADER_LOCK_KEY if db_enabled() else ''}"
     )
 
     # Live trading confirmation gate (ONLY live endpoint + DRY_RUN=false)
@@ -358,7 +446,29 @@ def main():
                 "LIVE trading blocked: set LIVE_TRADING_CONFIRM=I_UNDERSTAND to enable live orders."
             )
 
-    state = load_state()
+    # ---- Postgres + leader lock (optional) ----
+    db_conn = None
+    state_id = ""
+    is_leader = True  # default if DB not enabled
+
+    if db_enabled():
+        db_conn = db_connect()
+        db_init(db_conn)
+        state_id = f"{SYMBOL}_state"
+
+        is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
+        if is_leader:
+            logging.info("LEADER_LOCK acquired -> ACTIVE mode (orders allowed)")
+        else:
+            logging.warning("LEADER_LOCK not acquired -> STANDBY mode (no orders)")
+    else:
+        logging.warning("DATABASE_URL not set -> using DISK state (single instance only)")
+
+    # ---- Load state ----
+    if db_conn is not None:
+        state = load_state_db(db_conn, state_id)
+    else:
+        state = load_state_disk()
 
     # last processed bar
     last_bar_ts_iso = state.get("last_bar_ts")
@@ -421,6 +531,15 @@ def main():
                 logging.info("MARKET_CLOSED waiting...")
                 time.sleep(30)
                 continue
+
+            # Standby: keep trying to become leader
+            if db_conn is not None and not is_leader:
+                is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
+                if is_leader:
+                    logging.info("LEADER_LOCK acquired -> ACTIVE mode (orders allowed)")
+                else:
+                    time.sleep(STANDBY_POLL_SEC)
+                    continue
 
             # Use Alpaca clock timestamp as "now" (UTC)
             now_utc = clock.timestamp
@@ -496,7 +615,8 @@ def main():
                 f"BAR_CLOSE {SYMBOL} t={bar_ts.isoformat()} O={o:.2f} C={c:.2f} red={is_red} "
                 f"group_anchor={group_anchor_close} sell_target={sell_target} "
                 f"pos_qty={int(pos_qty)} avg_entry={avg_entry} owned_qty={owned_qty} "
-                f"buys_today_et={int(state.get('buys_today_et', 0))}"
+                f"buys_today_et={int(state.get('buys_today_et', 0))} "
+                f"is_leader={is_leader}"
             )
 
             if group_anchor_close is not None and avg_entry is not None:
@@ -527,32 +647,36 @@ def main():
                         )
                         set_owned_qty(state, owned_qty - sell_qty)
                     else:
-                        logging.info(
-                            f"SELL_SIGNAL_OWNED trigger=CLOSE_AT_OR_ABOVE_TARGET "
-                            f"close={c:.2f} target={float(sell_target):.2f} anchor={float(group_anchor_close):.2f} "
-                            f"sell_pct={SELL_PCT} sell_qty={sell_qty} owned_qty={owned_qty} pos_qty={int(pos_qty)}"
-                        )
-                        order = submit_market_sell(SYMBOL, sell_qty)
-                        logging.info(
-                            f"ORDER_SUBMITTED id={order.id} qty={sell_qty} type=market side=sell"
-                        )
+                        if db_conn is not None and not is_leader:
+                            logging.warning("STANDBY_BLOCK: skipping SELL (no leader lock)")
+                        else:
+                            logging.info(
+                                f"SELL_SIGNAL_OWNED trigger=CLOSE_AT_OR_ABOVE_TARGET "
+                                f"close={c:.2f} target={float(sell_target):.2f} anchor={float(group_anchor_close):.2f} "
+                                f"sell_pct={SELL_PCT} sell_qty={sell_qty} owned_qty={owned_qty} pos_qty={int(pos_qty)}"
+                            )
+                            order = submit_market_sell(SYMBOL, sell_qty)
+                            logging.info(
+                                f"ORDER_SUBMITTED id={order.id} qty={sell_qty} type=market side=sell"
+                            )
 
-                        final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
-                        status = (final.status or "").lower()
-                        filled_qty = getattr(final, "filled_qty", None)
-                        avg_fill = getattr(final, "filled_avg_price", None)
+                            final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
+                            status = (final.status or "").lower()
+                            filled_qty = getattr(final, "filled_qty", None)
+                            avg_fill = getattr(final, "filled_avg_price", None)
 
-                        logging.info(
-                            f"ORDER_FINAL id={order.id} status={status} filled_qty={filled_qty} avg_fill_price={avg_fill}"
-                        )
+                            logging.info(
+                                f"ORDER_FINAL id={order.id} status={status} filled_qty={filled_qty} avg_fill_price={avg_fill}"
+                            )
 
-                        dec = 0
-                        try:
-                            dec = int(float(filled_qty)) if filled_qty is not None else sell_qty
-                        except Exception:
-                            dec = sell_qty
-                        set_owned_qty(state, owned_qty - dec)
+                            dec = 0
+                            try:
+                                dec = int(float(filled_qty)) if filled_qty is not None else sell_qty
+                            except Exception:
+                                dec = sell_qty
+                            set_owned_qty(state, owned_qty - dec)
 
+                    # After sell (real or simulated), reset group
                     logging.info("GROUP_RESET after owned sell")
                     reset_group_state(state)
                     group_anchor_close = None
@@ -622,40 +746,38 @@ def main():
                                 f"close={c:.2f} qty={ORDER_QTY}"
                             )
                             set_owned_qty(state, get_owned_qty(state) + ORDER_QTY)
-                            # Count only FILLED buys toward the daily limit
-                            if status == "filled":
-                                state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
-                            else:
-                                logging.warning(f"BUY_NOT_COUNTED buys_today_et unchanged because status={status}")
-
-                        else:
-                            logging.info(
-                                f"BUY_SIGNAL total#{buy_count_total} group#{group_buy_count} reason={reason} "
-                                f"close={c:.2f} qty={ORDER_QTY}"
-                            )
-                            order = submit_market_buy(SYMBOL, ORDER_QTY)
-                            logging.info(
-                                f"ORDER_SUBMITTED id={order.id} qty={ORDER_QTY} type=market side=buy"
-                            )
-
-                            final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
-                            status = (final.status or "").lower()
-                            filled_qty = getattr(final, "filled_qty", None)
-                            avg_fill = getattr(final, "filled_avg_price", None)
-
-                            logging.info(
-                                f"ORDER_FINAL id={order.id} status={status} filled_qty={filled_qty} avg_fill_price={avg_fill}"
-                            )
-
-                            inc = 0
-                            try:
-                                inc = int(float(filled_qty)) if filled_qty is not None else ORDER_QTY
-                            except Exception:
-                                inc = ORDER_QTY
-                            set_owned_qty(state, get_owned_qty(state) + inc)
-
-                            # Count a buy for the day if we actually attempted the buy (fills may vary).
                             state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
+                        else:
+                            if db_conn is not None and not is_leader:
+                                logging.warning("STANDBY_BLOCK: skipping BUY (no leader lock)")
+                            else:
+                                logging.info(
+                                    f"BUY_SIGNAL total#{buy_count_total} group#{group_buy_count} reason={reason} "
+                                    f"close={c:.2f} qty={ORDER_QTY}"
+                                )
+                                order = submit_market_buy(SYMBOL, ORDER_QTY)
+                                logging.info(
+                                    f"ORDER_SUBMITTED id={order.id} qty={ORDER_QTY} type=market side=buy"
+                                )
+
+                                final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
+                                status = (final.status or "").lower()
+                                filled_qty = getattr(final, "filled_qty", None)
+                                avg_fill = getattr(final, "filled_avg_price", None)
+
+                                logging.info(
+                                    f"ORDER_FINAL id={order.id} status={status} filled_qty={filled_qty} avg_fill_price={avg_fill}"
+                                )
+
+                                inc = 0
+                                try:
+                                    inc = int(float(filled_qty)) if filled_qty is not None else ORDER_QTY
+                                except Exception:
+                                    inc = ORDER_QTY
+                                set_owned_qty(state, get_owned_qty(state) + inc)
+
+                                # Count buy attempt toward daily limit (fills may vary)
+                                state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
 
                         last_red_buy_close = float(c)
                         logging.info(f"RED_BUY_MEMORY_UPDATE last_red_buy_close={last_red_buy_close:.2f}")
@@ -678,7 +800,7 @@ def main():
                 "buys_today_et": int(state.get("buys_today_et", 0)),
                 "symbol": SYMBOL,
             }
-            maybe_persist_state(state, payload)
+            maybe_persist_state(state, payload, db_conn=db_conn, state_id=state_id)
 
             time.sleep(POLL_SEC)
 
