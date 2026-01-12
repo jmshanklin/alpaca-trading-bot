@@ -389,23 +389,42 @@ def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
 
 
 def pick_latest_closed_bar(symbol: str, now_utc: datetime):
-    # ✅ REAL get_bars call (no "...")
-    bars = alpaca_call_with_retry(
-        lambda: api.get_bars(symbol, tradeapi.TimeFrame.Minute, limit=5),
-        label="get_bars",
-    )
+    """
+    Fetch a few recent 1-minute bars and return the most recent *closed* bar.
+    Uses Alpaca timestamps (UTC).
+    """
+    def _fetch():
+        # Fetch the most recent bars (includes the current in-progress bar)
+        return api.get_bars(symbol, tradeapi.TimeFrame.Minute, limit=10)
 
+    bars = alpaca_call_with_retry(_fetch, label="get_bars")
     if not bars:
         return None
 
+    # Normalize return types (alpaca_trade_api versions vary)
+    # - Sometimes it's a list-like
+    # - Sometimes it's a dict keyed by symbol
+    if isinstance(bars, dict):
+        bars = bars.get(symbol, [])
+
+    bars = list(bars)
+    if not bars:
+        return None
+
+    # "now_floor" is the current minute boundary (still forming bar)
     now_floor = now_utc.replace(second=0, microsecond=0)
 
+    # Return the latest bar whose timestamp is strictly less than current minute
     for b in reversed(bars):
-        bt = b.t
+        bt = getattr(b, "t", None)
+        if bt is None:
+            continue
         if bt.tzinfo is None:
             bt = bt.replace(tzinfo=timezone.utc)
+
         if bt < now_floor:
             return b
+
     return None
 
 
