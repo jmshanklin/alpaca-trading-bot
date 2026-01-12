@@ -12,6 +12,54 @@ import alpaca_trade_api as tradeapi
 import psycopg2
 from psycopg2.extras import Json
 
+import random
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
+
+def alpaca_call_with_retry(fn: Callable[[], T], *, tries: int = 8, base_sleep: float = 0.5, max_sleep: float = 10.0, label: str = "alpaca_call") -> T:
+    """
+    Retries Alpaca calls on transient errors (500/502/503/504, timeouts, connection resets).
+    Raises on non-transient errors (like 401 Unauthorized).
+    """
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e).lower()
+
+            # --- Treat these as transient ---
+            transient = (
+                "internal server error" in msg or
+                "service unavailable" in msg or
+                "bad gateway" in msg or
+                "gateway timeout" in msg or
+                "timed out" in msg or
+                "timeout" in msg or
+                "connection reset" in msg or
+                "temporarily unavailable" in msg
+            )
+
+            # --- Treat these as fatal (don’t retry) ---
+            fatal = ("unauthorized" in msg or "forbidden" in msg or "invalid api key" in msg)
+
+            if fatal:
+                logger.error(f"{label}: FATAL error (not retrying): {e}")
+                raise
+
+            if not transient:
+                # Unknown error: retry a couple times, then raise
+                if attempt >= 3:
+                    logger.error(f"{label}: non-transient after {attempt} attempts: {e}")
+                    raise
+
+            sleep_s = min(max_sleep, base_sleep * (2 ** (attempt - 1)))
+            sleep_s = sleep_s * (0.8 + 0.4 * random.random())  # jitter
+            logger.warning(f"{label}: transient error attempt {attempt}/{tries}: {e} | sleeping {sleep_s:.2f}s")
+            time.sleep(sleep_s)
+
+    raise RuntimeError(f"{label}: failed after {tries} attempts")
+
 # =========================
 # Logging in Central Time
 # =========================
@@ -365,7 +413,7 @@ def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
 
 
 def pick_latest_closed_bar(symbol: str, now_utc: datetime):
-    bars = api.get_bars(symbol, tradeapi.TimeFrame.Minute, limit=5)
+    bars = alpaca_call_with_retry(lambda: api.get_bars(...), label="get_bars")
     if not bars:
         return None
 
@@ -525,7 +573,7 @@ def main():
 
     while True:
         try:
-            clock = api.get_clock()
+            clock = alpaca_call_with_retry(lambda: api.get_clock(), label="get_clock")
 
             if not clock.is_open:
                 logging.info("MARKET_CLOSED waiting...")
