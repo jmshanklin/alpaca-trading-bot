@@ -13,6 +13,83 @@ import alpaca_trade_api as tradeapi
 # Postgres (for resilient v1 state + leader lock)
 import psycopg2
 from psycopg2.extras import Json
+*** a/engine_readonly.py
+--- b/engine_readonly.py
+***************
+*** 1,10 ****
+  import os 
+  import time
+  import json
+  import logging
+  import hashlib
+- from datetime import datetime, timezone
++ from datetime import datetime, timezone, timedelta
+  from zoneinfo import ZoneInfo
+  
+  import alpaca_trade_api as tradeapi
++ from alpaca_trade_api.rest import TimeFrame
+  
+  # Postgres (for resilient v1 state + leader lock)
+  import psycopg2
+  from psycopg2.extras import Json
+***************
+*** 188,214 ****
+  def pick_latest_closed_bar(symbol: str, now_utc: datetime):
+-     bars = alpaca_call_with_retry(lambda: api.get_bars(...), label="get_bars")
+-     if not bars:
+-         return None
+- 
+-     now_floor = now_utc.replace(second=0, microsecond=0)
+- 
+-     for b in reversed(bars):
+-         bt = b.t
+-         if bt.tzinfo is None:
+-             bt = bt.replace(tzinfo=timezone.utc)
+-         if bt < now_floor:
+-             return b
+-     return None
++     """
++     Return the most recent *closed* 1-minute bar.
++     Key detail: request multiple bars; if you only request 1 bar you often get
++     the current in-progress minute bar, which is NOT closed yet.
++     """
++     try:
++         end = now_utc
++         start = end - timedelta(minutes=10)
++ 
++         def _fetch():
++             # Request multiple recent 1-min bars so we can pick a closed one.
++             return api.get_bars(
++                 symbol,
++                 TimeFrame.Minute,
++                 start=start.isoformat(),
++                 end=end.isoformat(),
++                 limit=10,
++                 adjustment="raw",
++             )
++ 
++         bars = alpaca_call_with_retry(_fetch, label="get_bars_1m")
++         if not bars:
++             logging.warning("BARS_EMPTY (no data returned)")
++             return None
++ 
++         # A bar is "closed" if its timestamp is strictly before the current minute.
++         now_floor = now_utc.replace(second=0, microsecond=0)
++ 
++         for b in reversed(bars):
++             bt = getattr(b, "t", None)
++             if bt is None:
++                 continue
++             if bt.tzinfo is None:
++                 bt = bt.replace(tzinfo=timezone.utc)
++             if bt < now_floor:
++                 return b
++ 
++         logging.info("NO_CLOSED_BAR_YET (still inside first seconds of minute?)")
++         return None
++     except Exception as e:
++         logging.error(f"GET_BARS_FAILED {e}", exc_info=True)
++         return None
 
 # =========================
 # Logging in Central Time
