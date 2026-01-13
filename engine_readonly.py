@@ -381,6 +381,8 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
         start = end - timedelta(minutes=10)
 
         def _fetch():
+            FEED = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
+
             return api.get_bars(
                 symbol,
                 TimeFrame.Minute,
@@ -388,6 +390,7 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
                 end=end.isoformat(),
                 limit=10,
                 adjustment="raw",
+                feed=FEED,   # <-- THIS is the fix SIP permission crash
             )
 
         bars = alpaca_call_with_retry(_fetch, label="get_bars_1m")
