@@ -172,6 +172,7 @@ ALPACA_BASE_URL = (
 )
 
 SYMBOL = os.getenv("ENGINE_SYMBOL", "TSLA").upper()
+logger.info(f"CONFIG alpaca_data_feed={os.getenv('ALPACA_DATA_FEED','(missing)')}")
 
 if not ALPACA_KEY_ID or not ALPACA_SECRET_KEY:
     raise RuntimeError(
@@ -382,7 +383,7 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
 
         def _fetch():
             FEED = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
-            logger.warning(f"DEBUG_FEED_SELECTED={FEED}")
+            
             return api.get_bars(
                 symbol,
                 TimeFrame.Minute,
