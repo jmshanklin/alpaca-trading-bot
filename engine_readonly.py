@@ -382,7 +382,7 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
 
         def _fetch():
             FEED = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
-
+            logger.warning(f"DEBUG_FEED_SELECTED={FEED}")
             return api.get_bars(
                 symbol,
                 TimeFrame.Minute,
