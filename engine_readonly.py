@@ -60,6 +60,11 @@ def alpaca_call_with_retry(
             return fn()
         except Exception as e:
             msg = str(e).lower()
+            
+            # --- NON-FATAL: no position yet (brand new account / no holdings) ---
+            if "position does not exist" in msg:
+                logger.info(f"{label}: no position exists (treating as empty)")
+                return None
 
             transient = (
                 "internal server error" in msg
