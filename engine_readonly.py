@@ -316,13 +316,14 @@ def maybe_persist_state(state: dict, payload: dict, *, db_conn=None, state_id: s
     else:
         save_state_disk(state)
 
-
 def get_position(symbol: str):
     try:
         return alpaca_call_with_retry(lambda: api.get_position(symbol), label="get_position")
-    except Exception:
+    except Exception as e:
+        msg = str(e).lower()
+        if "position does not exist" in msg:
+            return None
         return None
-
 
 def get_position_qty(symbol: str) -> float:
     pos = get_position(symbol)
@@ -332,7 +333,6 @@ def get_position_qty(symbol: str) -> float:
         return float(pos.qty)
     except Exception:
         return 0.0
-
 
 def get_position_avg_entry(symbol: str):
     pos = get_position(symbol)
@@ -346,20 +346,17 @@ def get_position_avg_entry(symbol: str):
     except Exception:
         return None
 
-
 def submit_market_buy(symbol: str, qty: int):
     return alpaca_call_with_retry(
         lambda: api.submit_order(symbol=symbol, qty=qty, side="buy", type="market", time_in_force="day"),
         label="submit_buy",
     )
 
-
 def submit_market_sell(symbol: str, qty: int):
     return alpaca_call_with_retry(
         lambda: api.submit_order(symbol=symbol, qty=qty, side="sell", type="market", time_in_force="day"),
         label="submit_sell",
     )
-
 
 def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
     start = time.time()
@@ -371,7 +368,6 @@ def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
         if time.time() - start >= timeout_sec:
             return o
         time.sleep(poll_sec)
-
 
 def pick_latest_closed_bar(symbol: str, now_utc: datetime):
     """
@@ -421,12 +417,10 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
         logger.error(f"GET_BARS_FAILED {e}", exc_info=True)
         return None
 
-
 def reset_group_state(state: dict) -> None:
     state["group_anchor_close"] = None
     state["last_red_buy_close"] = None
     state["group_buy_count"] = 0
-
 
 def get_owned_qty(state: dict) -> int:
     key = "sim_owned_qty" if DRY_RUN else "strategy_owned_qty"
@@ -435,11 +429,9 @@ def get_owned_qty(state: dict) -> int:
     except Exception:
         return 0
 
-
 def set_owned_qty(state: dict, new_qty: int) -> None:
     key = "sim_owned_qty" if DRY_RUN else "strategy_owned_qty"
     state[key] = max(0, int(new_qty))
-
 
 def main():
     live_endpoint = is_live_endpoint(ALPACA_BASE_URL)
