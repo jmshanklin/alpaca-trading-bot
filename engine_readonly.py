@@ -715,6 +715,7 @@ def main():
     while True:
         try:
             clock = alpaca_call_with_retry(lambda: api.get_clock(), label="get_clock")
+            logger.info(f"CLOCK is_open={clock.is_open} ts={clock.timestamp} next_open={clock.next_open} next_close={clock.next_close}")
             market_is_open = bool(clock.is_open)
 
             # -------------------------
