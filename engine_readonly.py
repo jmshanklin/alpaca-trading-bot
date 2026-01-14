@@ -97,7 +97,6 @@ def alpaca_call_with_retry(
     """
     Retries Alpaca calls on transient errors (500/502/503/504, timeouts, connection resets).
     Raises on fatal errors (401 Unauthorized, Forbidden).
-    Treats "position does not exist" as non-fatal ONLY when the caller expects that.
     """
     for attempt in range(1, tries + 1):
         try:
@@ -177,7 +176,6 @@ FILL_TIMEOUT_SEC = env_float("FILL_TIMEOUT_SEC", 20.0)
 FILL_POLL_SEC = env_float("FILL_POLL_SEC", 0.5)
 
 MAX_BUYS_PER_TICK = env_int("MAX_BUYS_PER_TICK", 1)
-
 LOG_POSITION_CHANGES = env_bool("LOG_POSITION_CHANGES", True)
 
 STATE_SAVE_SEC = env_float("STATE_SAVE_SEC", 0.0)
@@ -187,7 +185,9 @@ RESET_SIM_OWNED_ON_START = env_bool("RESET_SIM_OWNED_ON_START", False)
 
 LIVE_TRADING_CONFIRM = env_str("LIVE_TRADING_CONFIRM", "")
 KILL_SWITCH = env_bool("KILL_SWITCH", False)
-STANDBY_ONLY = os.getenv("STANDBY_ONLY", "false").strip().lower() in ("1","true","yes","y","on")
+
+# IMPORTANT: Use env_bool here (consistent parsing)
+STANDBY_ONLY = env_bool("STANDBY_ONLY", False)
 
 MAX_DOLLARS_PER_BUY = env_float("MAX_DOLLARS_PER_BUY", 0.0)  # 0 disables
 MAX_POSITION_QTY = env_int("MAX_POSITION_QTY", 0)  # 0 disables
@@ -198,6 +198,7 @@ TRADE_END_ET = env_str("TRADE_END_ET", "")
 
 STATE_PATH = resolve_state_path()
 
+# Accept either ALPACA_* or APCA_* (Render screenshot uses APCA_*)
 ALPACA_KEY_ID = env_str("ALPACA_KEY_ID") or env_str("APCA_API_KEY_ID")
 ALPACA_SECRET_KEY = env_str("ALPACA_SECRET_KEY") or env_str("APCA_API_SECRET_KEY")
 ALPACA_BASE_URL = env_str("ALPACA_BASE_URL") or env_str("APCA_API_BASE_URL") or "https://paper-api.alpaca.markets"
@@ -636,6 +637,7 @@ def main():
         f"max_buys_per_day={MAX_BUYS_PER_DAY} trade_start_et={TRADE_START_ET} trade_end_et={TRADE_END_ET} "
         f"dry_run={DRY_RUN} alpaca_base_url={ALPACA_BASE_URL} alpaca_is_live_endpoint={live_endpoint} "
         f"db_enabled={db_enabled()} leader_lock_key={LEADER_LOCK_KEY if db_enabled() else ''} "
+        f"standby_only={STANDBY_ONLY} standby_poll_sec={STANDBY_POLL_SEC} "
         f"self_test={SELF_TEST} self_test_every_sec={SELF_TEST_EVERY_SEC} self_test_no_orders={SELF_TEST_NO_ORDERS}"
     )
 
@@ -643,18 +645,6 @@ def main():
     if (not DRY_RUN) and live_endpoint:
         if LIVE_TRADING_CONFIRM != "I_UNDERSTAND":
             raise RuntimeError("LIVE trading blocked: set LIVE_TRADING_CONFIRM=I_UNDERSTAND to enable live orders.")
-    if STANDBY_ONLY:
-        is_leader = False
-        logger.warning("STANDBY_ONLY is ON -> forcing STANDBY mode (will not acquire leader lock).")
-    else:
-        is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
-        
-    if db_conn is not None and not is_leader:
-    if STANDBY_ONLY:
-        time.sleep(STANDBY_POLL_SEC)
-        continue
-    is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
-    ...
 
     # ---- Postgres + leader lock (optional) ----
     db_conn = None
@@ -666,9 +656,16 @@ def main():
         db_init(db_conn)
         state_id = f"{SYMBOL}_state"
 
-        is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
-        logger.info("LEADER_LOCK acquired -> ACTIVE mode (orders allowed)" if is_leader else
-                    "LEADER_LOCK not acquired -> STANDBY mode (no orders)")
+        if STANDBY_ONLY:
+            is_leader = False
+            logger.info("STANDBY_ONLY=true -> STANDBY mode (no leader lock attempt)")
+        else:
+            is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
+            logger.info(
+                "LEADER_LOCK acquired -> ACTIVE mode (orders allowed)"
+                if is_leader else
+                "LEADER_LOCK not acquired -> STANDBY mode (no orders)"
+            )
     else:
         logger.warning("DATABASE_URL not set -> using DISK state (single instance only)")
 
@@ -749,6 +746,12 @@ def main():
             # Leader lock handling
             # -------------------------
             if db_conn is not None and not is_leader:
+                # If this instance is configured as standby, just wait.
+                if STANDBY_ONLY:
+                    time.sleep(STANDBY_POLL_SEC)
+                    continue
+
+                # Otherwise, keep trying to acquire leadership.
                 is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
                 if not is_leader:
                     time.sleep(STANDBY_POLL_SEC)
