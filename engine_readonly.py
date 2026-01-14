@@ -178,6 +178,14 @@ ALPACA_BASE_URL = (
 
 SYMBOL = os.getenv("ENGINE_SYMBOL", "TSLA").upper()
 logger.info(f"CONFIG alpaca_data_feed={os.getenv('ALPACA_DATA_FEED','(missing)')}")
+# =========================
+# Self-test / Heartbeat mode (after-hours safe)
+# =========================
+SELF_TEST = os.getenv("SELF_TEST", "false").strip().lower() in ("1", "true", "yes", "y", "on")
+SELF_TEST_EVERY_SEC = float(os.getenv("SELF_TEST_EVERY_SEC", "300"))
+SELF_TEST_LOOKBACK_MIN = int(os.getenv("SELF_TEST_LOOKBACK_MIN", "180"))
+SELF_TEST_MAX_AGE_MIN = int(os.getenv("SELF_TEST_MAX_AGE_MIN", "90"))
+SELF_TEST_NO_ORDERS = os.getenv("SELF_TEST_NO_ORDERS", "true").strip().lower() in ("1", "true", "yes", "y", "on")
 
 if not ALPACA_KEY_ID or not ALPACA_SECRET_KEY:
     raise RuntimeError(
@@ -197,7 +205,73 @@ def is_live_endpoint(url: str) -> bool:
     if "paper-api" in u:
         return False
     return "api.alpaca.markets" in u
+    
+def run_self_test(api, symbol: str):
+    """
+    After-hours heartbeat:
+    - proves API auth works
+    - proves data feed works (bars fetch)
+    - proves candle logic runs (red count)
+    - never places orders
+    """
+    now_utc = datetime.now(timezone.utc)
+    start = now_utc - timedelta(minutes=SELF_TEST_LOOKBACK_MIN)
 
+    feed = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
+    logger.warning(f"SELF_TEST start symbol={symbol} feed={feed} lookback_min={SELF_TEST_LOOKBACK_MIN}")
+
+    try:
+        bars = api.get_bars(
+            symbol,
+            TimeFrame.Minute,
+            start=start.isoformat(),
+            end=now_utc.isoformat(),
+            limit=SELF_TEST_LOOKBACK_MIN,   # one bar per minute
+            adjustment="raw",
+            feed=feed,
+        )
+    except Exception as e:
+        logger.error(f"SELF_TEST FAIL: get_bars exception: {e}")
+        return False
+
+    if not bars:
+        logger.error("SELF_TEST FAIL: get_bars returned 0 bars")
+        return False
+
+    # Convert to list; alpaca-trade-api returns an iterable-like object
+    bars_list = list(bars)
+    last = bars_list[-1]
+
+    # last.t is typically timezone-aware; if not, assume UTC
+    last_ts = getattr(last, "t", None)
+    if last_ts is None:
+        logger.error("SELF_TEST FAIL: last bar has no timestamp 't'")
+        return False
+
+    # Make sure we can compare
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+    age_min = (now_utc - last_ts).total_seconds() / 60.0
+
+    red_count = 0
+    for b in bars_list:
+        o = float(getattr(b, "o", 0.0))
+        c = float(getattr(b, "c", 0.0))
+        if c < o:
+            red_count += 1
+
+    logger.warning(
+        f"SELF_TEST bars={len(bars_list)} last_ts={last_ts.isoformat()} age_min={age_min:.1f} "
+        f"last_o={float(last.o):.2f} last_c={float(last.c):.2f} red_count={red_count}"
+    )
+
+    if age_min > SELF_TEST_MAX_AGE_MIN:
+        logger.error(f"SELF_TEST FAIL: last bar too old (age_min={age_min:.1f} > {SELF_TEST_MAX_AGE_MIN})")
+        return False
+
+    logger.warning("SELF_TEST PASS ✅")
+    return True
 
 def parse_hhmm(s: str):
     try:
@@ -491,9 +565,19 @@ def main():
     while True:
         try:
             clock = alpaca_call_with_retry(lambda: api.get_clock(), label="get_clock")
-            if not clock.is_open:
+            if market_is_closed:  # whatever your condition is
+                if SELF_TEST:
+                    ok = run_self_test(api, symbol)
+            
+                    # Hard safety: never trade in self-test mode
+                    if SELF_TEST_NO_ORDERS:
+                        logger.warning("SELF_TEST_NO_ORDERS is ON (trading disabled in self-test mode)")
+            
+                    time.sleep(SELF_TEST_EVERY_SEC)
+                    continue
+            
                 logger.info("MARKET_CLOSED waiting...")
-                time.sleep(30)
+                time.sleep(POLL_SEC)
                 continue
 
             if db_conn is not None and not is_leader:
