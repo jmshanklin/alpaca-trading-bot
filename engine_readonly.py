@@ -187,6 +187,7 @@ RESET_SIM_OWNED_ON_START = env_bool("RESET_SIM_OWNED_ON_START", False)
 
 LIVE_TRADING_CONFIRM = env_str("LIVE_TRADING_CONFIRM", "")
 KILL_SWITCH = env_bool("KILL_SWITCH", False)
+STANDBY_ONLY = os.getenv("STANDBY_ONLY", "false").strip().lower() in ("1","true","yes","y","on")
 
 MAX_DOLLARS_PER_BUY = env_float("MAX_DOLLARS_PER_BUY", 0.0)  # 0 disables
 MAX_POSITION_QTY = env_int("MAX_POSITION_QTY", 0)  # 0 disables
@@ -642,6 +643,18 @@ def main():
     if (not DRY_RUN) and live_endpoint:
         if LIVE_TRADING_CONFIRM != "I_UNDERSTAND":
             raise RuntimeError("LIVE trading blocked: set LIVE_TRADING_CONFIRM=I_UNDERSTAND to enable live orders.")
+    if STANDBY_ONLY:
+        is_leader = False
+        logger.warning("STANDBY_ONLY is ON -> forcing STANDBY mode (will not acquire leader lock).")
+    else:
+        is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
+        
+    if db_conn is not None and not is_leader:
+    if STANDBY_ONLY:
+        time.sleep(STANDBY_POLL_SEC)
+        continue
+    is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
+    ...
 
     # ---- Postgres + leader lock (optional) ----
     db_conn = None
