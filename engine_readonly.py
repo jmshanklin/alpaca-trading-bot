@@ -6,7 +6,7 @@ import hashlib
 import random
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from typing import Callable, TypeVar
+from typing import Callable, TypeVar, Optional
 
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame
@@ -14,7 +14,6 @@ from alpaca_trade_api.rest import TimeFrame
 # Postgres (for resilient v1 state + leader lock)
 import psycopg2
 from psycopg2.extras import Json
-
 
 # =========================
 # Logging in Central Time
@@ -60,11 +59,6 @@ def alpaca_call_with_retry(
             return fn()
         except Exception as e:
             msg = str(e).lower()
-            
-            # --- NON-FATAL: no position yet (brand new account / no holdings) ---
-            if "position does not exist" in msg:
-                logger.debug(f"{label}: no position exists (treating as empty)")
-                return None
 
             transient = (
                 "internal server error" in msg
@@ -177,12 +171,16 @@ ALPACA_BASE_URL = (
 )
 
 SYMBOL = os.getenv("ENGINE_SYMBOL", "TSLA").upper()
-logger.info(f"CONFIG alpaca_data_feed={os.getenv('ALPACA_DATA_FEED','(missing)')}")
+
+# Data feed selection (iex = free for paper; sip requires subscription)
+ALPACA_DATA_FEED = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
+logger.info(f"CONFIG alpaca_data_feed={ALPACA_DATA_FEED}")
+
 # =========================
 # Self-test / Heartbeat mode (after-hours safe)
 # =========================
 SELF_TEST = os.getenv("SELF_TEST", "false").strip().lower() in ("1", "true", "yes", "y", "on")
-SELF_TEST_EVERY_SEC = float(os.getenv("SELF_TEST_EVERY_SEC", "300"))
+SELF_TEST_EVERY_SEC = float(os.getenv("SELF_TEST_EVERY_SEC", "300"))  # 300 = 5 minutes
 SELF_TEST_LOOKBACK_MIN = int(os.getenv("SELF_TEST_LOOKBACK_MIN", "180"))
 SELF_TEST_MAX_AGE_MIN = int(os.getenv("SELF_TEST_MAX_AGE_MIN", "90"))
 SELF_TEST_NO_ORDERS = os.getenv("SELF_TEST_NO_ORDERS", "true").strip().lower() in ("1", "true", "yes", "y", "on")
@@ -195,83 +193,21 @@ if not ALPACA_KEY_ID or not ALPACA_SECRET_KEY:
 
 api = tradeapi.REST(ALPACA_KEY_ID, ALPACA_SECRET_KEY, ALPACA_BASE_URL)
 
+# -------- Postgres state + leader lock (v1 resilient) --------
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 LEADER_LOCK_KEY = os.getenv("LEADER_LOCK_KEY", f"{SYMBOL}_ENGINE_V1").strip()
 STANDBY_POLL_SEC = float(os.getenv("STANDBY_POLL_SEC", "2"))
 
 
+# =========================
+# Live/paper detection + time helpers
+# =========================
 def is_live_endpoint(url: str) -> bool:
     u = (url or "").lower()
     if "paper-api" in u:
         return False
     return "api.alpaca.markets" in u
-    
-def run_self_test(api, symbol: str):
-    """
-    After-hours heartbeat:
-    - proves API auth works
-    - proves data feed works (bars fetch)
-    - proves candle logic runs (red count)
-    - never places orders
-    """
-    now_utc = datetime.now(timezone.utc)
-    start = now_utc - timedelta(minutes=SELF_TEST_LOOKBACK_MIN)
 
-    feed = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
-    logger.warning(f"SELF_TEST start symbol={symbol} feed={feed} lookback_min={SELF_TEST_LOOKBACK_MIN}")
-
-    try:
-        bars = api.get_bars(
-            symbol,
-            TimeFrame.Minute,
-            start=start.isoformat(),
-            end=now_utc.isoformat(),
-            limit=SELF_TEST_LOOKBACK_MIN,   # one bar per minute
-            adjustment="raw",
-            feed=feed,
-        )
-    except Exception as e:
-        logger.error(f"SELF_TEST FAIL: get_bars exception: {e}")
-        return False
-
-    if not bars:
-        logger.error("SELF_TEST FAIL: get_bars returned 0 bars")
-        return False
-
-    # Convert to list; alpaca-trade-api returns an iterable-like object
-    bars_list = list(bars)
-    last = bars_list[-1]
-
-    # last.t is typically timezone-aware; if not, assume UTC
-    last_ts = getattr(last, "t", None)
-    if last_ts is None:
-        logger.error("SELF_TEST FAIL: last bar has no timestamp 't'")
-        return False
-
-    # Make sure we can compare
-    if last_ts.tzinfo is None:
-        last_ts = last_ts.replace(tzinfo=timezone.utc)
-
-    age_min = (now_utc - last_ts).total_seconds() / 60.0
-
-    red_count = 0
-    for b in bars_list:
-        o = float(getattr(b, "o", 0.0))
-        c = float(getattr(b, "c", 0.0))
-        if c < o:
-            red_count += 1
-
-    logger.warning(
-        f"SELF_TEST bars={len(bars_list)} last_ts={last_ts.isoformat()} age_min={age_min:.1f} "
-        f"last_o={float(last.o):.2f} last_c={float(last.c):.2f} red_count={red_count}"
-    )
-
-    if age_min > SELF_TEST_MAX_AGE_MIN:
-        logger.error(f"SELF_TEST FAIL: last bar too old (age_min={age_min:.1f} > {SELF_TEST_MAX_AGE_MIN})")
-        return False
-
-    logger.warning("SELF_TEST PASS ✅")
-    return True
 
 def parse_hhmm(s: str):
     try:
@@ -300,6 +236,83 @@ def et_date_str(now_utc: datetime) -> str:
     return now_utc.astimezone(ET).date().isoformat()
 
 
+# =========================
+# Self test
+# =========================
+def run_self_test(api_client, symbol: str) -> bool:
+    """
+    After-hours heartbeat:
+    - proves API auth works
+    - proves data feed works (bars fetch)
+    - proves candle logic runs (red count)
+    - never places orders
+    """
+    now_utc = datetime.now(timezone.utc)
+    start = now_utc - timedelta(minutes=SELF_TEST_LOOKBACK_MIN)
+
+    logger.warning(
+        f"SELF_TEST start symbol={symbol} feed={ALPACA_DATA_FEED} lookback_min={SELF_TEST_LOOKBACK_MIN}"
+    )
+
+    try:
+        bars = api_client.get_bars(
+            symbol,
+            TimeFrame.Minute,
+            start=start.isoformat(),
+            end=now_utc.isoformat(),
+            limit=min(10000, max(1, SELF_TEST_LOOKBACK_MIN)),  # safe bound
+            adjustment="raw",
+            feed=ALPACA_DATA_FEED,
+        )
+    except Exception as e:
+        logger.error(f"SELF_TEST FAIL: get_bars exception: {e}", exc_info=True)
+        return False
+
+    if not bars:
+        logger.error("SELF_TEST FAIL: get_bars returned 0 bars")
+        return False
+
+    bars_list = list(bars)
+    if not bars_list:
+        logger.error("SELF_TEST FAIL: get_bars returned empty iterable")
+        return False
+
+    last = bars_list[-1]
+    last_ts = getattr(last, "t", None)
+    if last_ts is None:
+        logger.error("SELF_TEST FAIL: last bar has no timestamp 't'")
+        return False
+
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+    age_min = (now_utc - last_ts).total_seconds() / 60.0
+
+    red_count = 0
+    for b in bars_list:
+        o = float(getattr(b, "o", 0.0))
+        c = float(getattr(b, "c", 0.0))
+        if c < o:
+            red_count += 1
+
+    logger.warning(
+        f"SELF_TEST bars={len(bars_list)} last_ts={last_ts.isoformat()} age_min={age_min:.1f} "
+        f"last_o={float(last.o):.2f} last_c={float(last.c):.2f} red_count={red_count}"
+    )
+
+    if age_min > SELF_TEST_MAX_AGE_MIN:
+        logger.error(
+            f"SELF_TEST FAIL: last bar too old (age_min={age_min:.1f} > {SELF_TEST_MAX_AGE_MIN})"
+        )
+        return False
+
+    logger.warning("SELF_TEST PASS ✅")
+    return True
+
+
+# =========================
+# Postgres state + leader lock
+# =========================
 def db_enabled() -> bool:
     return bool(DATABASE_URL)
 
@@ -355,6 +368,9 @@ def save_state_db(conn, state_id: str, state: dict) -> None:
         )
 
 
+# =========================
+# Disk state (fallback)
+# =========================
 def load_state_disk() -> dict:
     try:
         if os.path.exists(STATE_PATH):
@@ -395,6 +411,10 @@ def maybe_persist_state(state: dict, payload: dict, *, db_conn=None, state_id: s
     else:
         save_state_disk(state)
 
+
+# =========================
+# Trading helpers (with retry)
+# =========================
 def get_position(symbol: str):
     try:
         return alpaca_call_with_retry(lambda: api.get_position(symbol), label="get_position")
@@ -404,6 +424,7 @@ def get_position(symbol: str):
             return None
         return None
 
+
 def get_position_qty(symbol: str) -> float:
     pos = get_position(symbol)
     if not pos:
@@ -412,6 +433,7 @@ def get_position_qty(symbol: str) -> float:
         return float(pos.qty)
     except Exception:
         return 0.0
+
 
 def get_position_avg_entry(symbol: str):
     pos = get_position(symbol)
@@ -425,17 +447,20 @@ def get_position_avg_entry(symbol: str):
     except Exception:
         return None
 
+
 def submit_market_buy(symbol: str, qty: int):
     return alpaca_call_with_retry(
         lambda: api.submit_order(symbol=symbol, qty=qty, side="buy", type="market", time_in_force="day"),
         label="submit_buy",
     )
 
+
 def submit_market_sell(symbol: str, qty: int):
     return alpaca_call_with_retry(
         lambda: api.submit_order(symbol=symbol, qty=qty, side="sell", type="market", time_in_force="day"),
         label="submit_sell",
     )
+
 
 def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
     start = time.time()
@@ -448,6 +473,7 @@ def wait_for_fill(order_id: str, timeout_sec: float, poll_sec: float):
             return o
         time.sleep(poll_sec)
 
+
 def pick_latest_closed_bar(symbol: str, now_utc: datetime):
     """
     Return the most recent *closed* 1-minute bar by requesting a short time range.
@@ -457,8 +483,6 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
         start = end - timedelta(minutes=10)
 
         def _fetch():
-            FEED = os.getenv("ALPACA_DATA_FEED", "iex").strip().lower()
-            
             return api.get_bars(
                 symbol,
                 TimeFrame.Minute,
@@ -466,7 +490,7 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
                 end=end.isoformat(),
                 limit=10,
                 adjustment="raw",
-                feed=FEED,   # <-- THIS is the fix SIP permission crash
+                feed=ALPACA_DATA_FEED,  # IMPORTANT: avoids SIP-permission crash when set to "iex"
             )
 
         bars = alpaca_call_with_retry(_fetch, label="get_bars_1m")
@@ -476,8 +500,10 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
 
         if isinstance(bars, dict):
             bars = bars.get(symbol, [])
+
         bars = list(bars)
         if not bars:
+            logger.warning("BARS_EMPTY_AFTER_NORMALIZE")
             return None
 
         now_floor = now_utc.replace(second=0, microsecond=0)
@@ -496,10 +522,12 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
         logger.error(f"GET_BARS_FAILED {e}", exc_info=True)
         return None
 
+
 def reset_group_state(state: dict) -> None:
     state["group_anchor_close"] = None
     state["last_red_buy_close"] = None
     state["group_buy_count"] = 0
+
 
 def get_owned_qty(state: dict) -> int:
     key = "sim_owned_qty" if DRY_RUN else "strategy_owned_qty"
@@ -508,19 +536,39 @@ def get_owned_qty(state: dict) -> int:
     except Exception:
         return 0
 
+
 def set_owned_qty(state: dict, new_qty: int) -> None:
     key = "sim_owned_qty" if DRY_RUN else "strategy_owned_qty"
     state[key] = max(0, int(new_qty))
 
+
+# =========================
+# Main
+# =========================
 def main():
     live_endpoint = is_live_endpoint(ALPACA_BASE_URL)
 
     logger.info(f"ENGINE_START mode=RED_CLOSE_GROUP_SELL_ANCHOR_PCT dry_run={DRY_RUN} symbol={SYMBOL}")
+    logger.info(
+        "ENGINE_CONFIG "
+        f"symbol={SYMBOL} order_qty={ORDER_QTY} poll_sec={POLL_SEC} "
+        f"fill_timeout_sec={FILL_TIMEOUT_SEC} fill_poll_sec={FILL_POLL_SEC} "
+        f"max_buys_per_tick={MAX_BUYS_PER_TICK} log_position_changes={LOG_POSITION_CHANGES} "
+        f"state_path={STATE_PATH} state_save_sec={STATE_SAVE_SEC} sell_pct={SELL_PCT} "
+        f"reset_sim_owned_on_start={RESET_SIM_OWNED_ON_START} kill_switch={KILL_SWITCH} "
+        f"max_dollars_per_buy={MAX_DOLLARS_PER_BUY} max_position_qty={MAX_POSITION_QTY} "
+        f"max_buys_per_day={MAX_BUYS_PER_DAY} trade_start_et={TRADE_START_ET} trade_end_et={TRADE_END_ET} "
+        f"dry_run={DRY_RUN} alpaca_base_url={ALPACA_BASE_URL} alpaca_is_live_endpoint={live_endpoint} "
+        f"db_enabled={db_enabled()} leader_lock_key={LEADER_LOCK_KEY if db_enabled() else ''} "
+        f"self_test={SELF_TEST} self_test_every_sec={SELF_TEST_EVERY_SEC} self_test_no_orders={SELF_TEST_NO_ORDERS}"
+    )
 
+    # Live trading confirmation gate (ONLY live endpoint + DRY_RUN=false)
     if (not DRY_RUN) and live_endpoint:
         if LIVE_TRADING_CONFIRM != "I_UNDERSTAND":
             raise RuntimeError("LIVE trading blocked: set LIVE_TRADING_CONFIRM=I_UNDERSTAND to enable live orders.")
 
+    # ---- Postgres + leader lock (optional) ----
     db_conn = None
     state_id = ""
     is_leader = True
@@ -529,15 +577,20 @@ def main():
         db_conn = db_connect()
         db_init(db_conn)
         state_id = f"{SYMBOL}_state"
+
         is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
-        logger.info("LEADER_LOCK acquired -> ACTIVE mode (orders allowed)" if is_leader else "LEADER_LOCK not acquired -> STANDBY mode (no orders)")
+        if is_leader:
+            logger.info("LEADER_LOCK acquired -> ACTIVE mode (orders allowed)")
+        else:
+            logger.warning("LEADER_LOCK not acquired -> STANDBY mode (no orders)")
     else:
         logger.warning("DATABASE_URL not set -> using DISK state (single instance only)")
 
+    # ---- Load state ----
     state = load_state_db(db_conn, state_id) if db_conn is not None else load_state_disk()
 
     last_bar_ts_iso = state.get("last_bar_ts")
-    last_bar_ts = None
+    last_bar_ts: Optional[datetime] = None
     if last_bar_ts_iso:
         try:
             last_bar_ts = datetime.fromisoformat(last_bar_ts_iso)
@@ -556,30 +609,50 @@ def main():
     state.setdefault("buys_today_et", 0)
     state.setdefault("buys_today_date_et", None)
 
+    if DRY_RUN and RESET_SIM_OWNED_ON_START:
+        old_sim = int(state.get("sim_owned_qty", 0))
+        if old_sim != 0:
+            logger.info(f"RESET_SIM_OWNED_ON_START enabled → sim_owned_qty {old_sim} → 0")
+        state["sim_owned_qty"] = 0
+
+    logger.info(
+        "STATE_LOADED "
+        f"last_bar_ts={last_bar_ts_iso} group_anchor_close={group_anchor_close} last_red_buy_close={last_red_buy_close} "
+        f"buy_count_total={buy_count_total} group_buy_count={group_buy_count} "
+        f"strategy_owned_qty={int(state.get('strategy_owned_qty', 0))} sim_owned_qty={int(state.get('sim_owned_qty', 0))} "
+        f"buys_today_date_et={state.get('buys_today_date_et')} buys_today_et={int(state.get('buys_today_et', 0))}"
+    )
+
+    # Position-change baseline
+    last_pos_qty = None
     if LOG_POSITION_CHANGES:
         last_pos_qty = get_position_qty(SYMBOL)
         logger.info(f"POSITION_INIT qty={last_pos_qty:.4f}")
-    else:
-        last_pos_qty = None
 
     while True:
         try:
             clock = alpaca_call_with_retry(lambda: api.get_clock(), label="get_clock")
-            if market_is_closed:  # whatever your condition is
+
+            # -------------------------
+            # Market closed branch
+            # -------------------------
+            if not clock.is_open:
                 if SELF_TEST:
-                    ok = run_self_test(api, symbol)
-            
-                    # Hard safety: never trade in self-test mode
+                    run_self_test(api, SYMBOL)
+
                     if SELF_TEST_NO_ORDERS:
                         logger.warning("SELF_TEST_NO_ORDERS is ON (trading disabled in self-test mode)")
-            
+
                     time.sleep(SELF_TEST_EVERY_SEC)
                     continue
-            
+
                 logger.info("MARKET_CLOSED waiting...")
-                time.sleep(POLL_SEC)
+                time.sleep(30)
                 continue
 
+            # -------------------------
+            # Leader lock handling
+            # -------------------------
             if db_conn is not None and not is_leader:
                 is_leader = try_acquire_leader_lock(db_conn, LEADER_LOCK_KEY)
                 if not is_leader:
@@ -587,16 +660,19 @@ def main():
                     continue
                 logger.info("LEADER_LOCK acquired -> ACTIVE mode (orders allowed)")
 
+            # Use Alpaca clock timestamp as "now" (UTC)
             now_utc = clock.timestamp
             if now_utc.tzinfo is None:
                 now_utc = now_utc.replace(tzinfo=timezone.utc)
 
+            # ET day rollover (daily buy limiter)
             today_et = et_date_str(now_utc)
             if state.get("buys_today_date_et") != today_et:
                 state["buys_today_date_et"] = today_et
                 state["buys_today_et"] = 0
                 logger.info(f"DAY_ROLLOVER_ET date={today_et} buys_today_et reset to 0")
 
+            # Optional: detect manual position changes and keep owned qty sane
             if LOG_POSITION_CHANGES:
                 pos_qty_now = get_position_qty(SYMBOL)
                 if last_pos_qty is None:
@@ -604,6 +680,24 @@ def main():
                 elif pos_qty_now != last_pos_qty:
                     logger.info(f"POSITION_CHANGE qty_from={last_pos_qty:.4f} qty_to={pos_qty_now:.4f}")
                     last_pos_qty = pos_qty_now
+
+                owned_now = get_owned_qty(state)
+                if int(pos_qty_now) < owned_now:
+                    logger.warning(
+                        f"OWNED_CLAMP position_qty={int(pos_qty_now)} owned_qty={owned_now} -> owned_qty={int(pos_qty_now)}"
+                    )
+                    set_owned_qty(state, int(pos_qty_now))
+
+                if pos_qty_now == 0.0:
+                    if get_owned_qty(state) != 0:
+                        logger.info("LIQUIDATION_DETECTED setting owned_qty=0 for current mode")
+                        set_owned_qty(state, 0)
+                    if group_anchor_close is not None or last_red_buy_close is not None or group_buy_count != 0:
+                        logger.info("LIQUIDATION_DETECTED resetting group state")
+                        reset_group_state(state)
+                        group_anchor_close = None
+                        last_red_buy_close = None
+                        group_buy_count = 0
 
             b = pick_latest_closed_bar(SYMBOL, now_utc)
             if b is None:
@@ -614,6 +708,7 @@ def main():
             if bar_ts.tzinfo is None:
                 bar_ts = bar_ts.replace(tzinfo=timezone.utc)
 
+            # Skip already processed candle
             if last_bar_ts is not None and bar_ts <= last_bar_ts:
                 time.sleep(POLL_SEC)
                 continue
@@ -646,16 +741,30 @@ def main():
                     sell_qty = min(int(pos_qty), int(owned_qty))
 
                     if DRY_RUN:
-                        logger.info(f"SIM_SELL_OWNED close={c:.2f} target={float(sell_target):.2f} sell_qty={sell_qty}")
+                        logger.info(
+                            f"SIM_SELL_OWNED close={c:.2f} target={float(sell_target):.2f} "
+                            f"sell_qty={sell_qty} owned_qty={owned_qty} pos_qty={int(pos_qty)}"
+                        )
                         set_owned_qty(state, owned_qty - sell_qty)
                     else:
                         if db_conn is not None and not is_leader:
                             logger.warning("STANDBY_BLOCK: skipping SELL (no leader lock)")
                         else:
-                            logger.info(f"SELL_SIGNAL_OWNED close={c:.2f} target={float(sell_target):.2f} sell_qty={sell_qty}")
+                            logger.info(
+                                f"SELL_SIGNAL_OWNED close={c:.2f} target={float(sell_target):.2f} sell_qty={sell_qty}"
+                            )
                             order = submit_market_sell(SYMBOL, sell_qty)
+                            logger.info(f"ORDER_SUBMITTED id={order.id} qty={sell_qty} side=sell")
+
                             final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
+                            status = (final.status or "").lower()
                             filled_qty = getattr(final, "filled_qty", None)
+                            avg_fill = getattr(final, "filled_avg_price", None)
+
+                            logger.info(
+                                f"ORDER_FINAL id={order.id} status={status} filled_qty={filled_qty} avg_fill_price={avg_fill}"
+                            )
+
                             dec = sell_qty
                             try:
                                 if filled_qty is not None:
@@ -695,13 +804,18 @@ def main():
                 if should_buy and MAX_POSITION_QTY > 0:
                     current_pos = int(get_position_qty(SYMBOL))
                     if current_pos + int(ORDER_QTY) > MAX_POSITION_QTY:
-                        logger.warning(f"BUY_BLOCKED would exceed MAX_POSITION_QTY={MAX_POSITION_QTY}")
+                        logger.warning(
+                            f"BUY_BLOCKED would exceed MAX_POSITION_QTY={MAX_POSITION_QTY} "
+                            f"(current_pos={current_pos}, order_qty={ORDER_QTY})"
+                        )
                         should_buy = False
 
                 if should_buy and MAX_DOLLARS_PER_BUY > 0:
                     est_cost = float(c) * int(ORDER_QTY)
                     if est_cost > MAX_DOLLARS_PER_BUY:
-                        logger.warning(f"BUY_BLOCKED est_cost=${est_cost:.2f} exceeds MAX_DOLLARS_PER_BUY=${MAX_DOLLARS_PER_BUY:.2f}")
+                        logger.warning(
+                            f"BUY_BLOCKED est_cost=${est_cost:.2f} exceeds MAX_DOLLARS_PER_BUY=${MAX_DOLLARS_PER_BUY:.2f}"
+                        )
                         should_buy = False
 
                 if should_buy:
@@ -717,17 +831,32 @@ def main():
                             logger.info(f"GROUP_ANCHOR_SET group_anchor_close={group_anchor_close:.2f}")
 
                         if DRY_RUN:
-                            logger.info(f"SIM_BUY total#{buy_count_total} group#{group_buy_count} reason={reason} close={c:.2f} qty={ORDER_QTY}")
+                            logger.info(
+                                f"SIM_BUY total#{buy_count_total} group#{group_buy_count} reason={reason} "
+                                f"close={c:.2f} qty={ORDER_QTY}"
+                            )
                             set_owned_qty(state, get_owned_qty(state) + ORDER_QTY)
                             state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
                         else:
                             if db_conn is not None and not is_leader:
                                 logger.warning("STANDBY_BLOCK: skipping BUY (no leader lock)")
                             else:
-                                logger.info(f"BUY_SIGNAL total#{buy_count_total} group#{group_buy_count} reason={reason} close={c:.2f} qty={ORDER_QTY}")
+                                logger.info(
+                                    f"BUY_SIGNAL total#{buy_count_total} group#{group_buy_count} reason={reason} "
+                                    f"close={c:.2f} qty={ORDER_QTY}"
+                                )
                                 order = submit_market_buy(SYMBOL, ORDER_QTY)
+                                logger.info(f"ORDER_SUBMITTED id={order.id} qty={ORDER_QTY} side=buy")
+
                                 final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
+                                status = (final.status or "").lower()
                                 filled_qty = getattr(final, "filled_qty", None)
+                                avg_fill = getattr(final, "filled_avg_price", None)
+
+                                logger.info(
+                                    f"ORDER_FINAL id={order.id} status={status} filled_qty={filled_qty} avg_fill_price={avg_fill}"
+                                )
+
                                 inc = ORDER_QTY
                                 try:
                                     if filled_qty is not None:
@@ -739,7 +868,10 @@ def main():
 
                         last_red_buy_close = float(c)
                         logger.info(f"RED_BUY_MEMORY_UPDATE last_red_buy_close={last_red_buy_close:.2f}")
+                else:
+                    logger.info(f"RED_SKIP reason={reason} close={c:.2f} last_red_buy_close={last_red_buy_close}")
 
+            # Persist
             last_bar_ts = bar_ts
             payload = {
                 "last_bar_ts": last_bar_ts.isoformat(),
