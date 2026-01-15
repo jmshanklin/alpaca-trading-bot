@@ -808,6 +808,28 @@ def main():
                 sell_target = float(group_anchor_close) * (1.0 + float(SELL_PCT))
 
             owned_qty = get_owned_qty(state)
+            
+            # -----------------------------------------
+            # POSITION-AWARE RE-ARM (LIVE-SAFE)
+            # If Alpaca has no open position, clear group memory
+            # so the next red candle can start a new group.
+            # -----------------------------------------
+            if int(pos_qty) == 0:
+                # Only log if we are actually clearing something
+                if (group_anchor_close is not None) or (last_red_buy_close is not None) or int(state.get("strategy_owned_qty", 0)) != 0:
+                    logger.warning(
+                        "NO_POSITION -> resetting group memory so next red candle can start a new group "
+                        f"(prev_anchor={group_anchor_close}, prev_last_red_buy_close={last_red_buy_close}, "
+                        f"strategy_owned_qty={int(state.get('strategy_owned_qty', 0))})"
+                    )
+            
+                reset_group_state(state)
+                group_anchor_close = None
+                last_red_buy_close = None
+                group_buy_count = 0
+
+                # Keep internal tracking aligned with Alpaca reality
+                state["strategy_owned_qty"] = 0
 
             logger.info(
                 f"BAR_CLOSE {SYMBOL} t={bar_ts.isoformat()} O={o:.2f} C={c:.2f} red={is_red} "
@@ -817,7 +839,7 @@ def main():
             )
 
             buys_this_tick = 0
-
+                    
             # SELL trigger
             if group_anchor_close is not None and sell_target is not None:
                 if int(pos_qty) > 0 and owned_qty > 0 and c >= float(sell_target):
