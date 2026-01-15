@@ -500,16 +500,20 @@ def maybe_persist_state(state: dict, payload: dict, *, db_conn=None, state_id: s
 # Trading helpers (with retry)
 # =========================
 def get_position(symbol: str):
+    """
+    Alpaca raises an exception if there is no open position.
+    That is a normal condition until the first buy.
+    We do NOT retry for that case to avoid noisy logs.
+    """
     try:
-        return alpaca_call_with_retry(lambda: api.get_position(symbol), label="get_position")
+        return api.get_position(symbol)
     except Exception as e:
         msg = str(e).lower()
         if "position does not exist" in msg:
             return None
-        logger.warning(f"get_position: unexpected error: {e}")
+        logger.error(f"get_position: unexpected error: {e}")
         return None
-
-
+        
 def get_position_qty(symbol: str) -> float:
     pos = get_position(symbol)
     if not pos:
