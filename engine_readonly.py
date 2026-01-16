@@ -681,10 +681,7 @@ def main():
     live_endpoint = is_live_endpoint(ALPACA_BASE_URL)
 
     logger.info(f"ENGINE_START mode=RED_CLOSE_GROUP_SELL_AVG_ENTRY_PCT dry_run={DRY_RUN} symbol={SYMBOL}")
-    print_startup_banner(
-        live_endpoint=live_endpoint,
-        is_leader=is_leader
-    )
+    
 
     logger.info(
         "ENGINE_CONFIG "
@@ -728,6 +725,11 @@ def main():
             )
     else:
         logger.warning("DATABASE_URL not set -> using DISK state (single instance only)")
+    
+    print_startup_banner(
+        live_endpoint=live_endpoint,
+        is_leader=is_leader
+    )
 
     # ---- Load state ----
     state = load_state_db(db_conn, state_id) if db_conn is not None else load_state_disk()
