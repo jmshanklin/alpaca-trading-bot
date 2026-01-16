@@ -37,6 +37,60 @@ logger.handlers = [handler]
 logger.propagate = False
 
 # =========================
+# Banners / Heartbeat
+# =========================
+HEARTBEAT_SEC = 300  # 5 minutes
+_last_heartbeat_ts = 0
+
+
+def print_startup_banner(*, live_endpoint: bool, is_leader: bool):
+    mode = "SIMULATION (DRY_RUN)" if DRY_RUN else "LIVE PAPER" if not live_endpoint else "LIVE REAL MONEY"
+    orders = "ENABLED" if (is_leader and not KILL_SWITCH) else "BLOCKED"
+
+    logger.warning("")
+    logger.warning("==============================================")
+    logger.warning("🚀 BOT STARTUP CONFIRMATION BANNER")
+    logger.warning("----------------------------------------------")
+    logger.warning(f"MODE:          {mode}")
+    logger.warning(f"SYMBOL:        {SYMBOL}")
+    logger.warning(f"SELL_PCT:     {SELL_PCT} ({SELL_PCT * 100:.3f}%)")
+    logger.warning(f"LEADER:       {is_leader}")
+    logger.warning(f"ORDERS:       {orders}")
+    logger.warning(f"DRY_RUN:      {DRY_RUN}")
+    logger.warning(f"KILL_SWITCH: {KILL_SWITCH}")
+    logger.warning(f"ENDPOINT:    {ALPACA_BASE_URL}")
+    logger.warning("==============================================")
+    logger.warning("")
+
+
+def maybe_print_heartbeat(*, pos_qty, avg_entry, sell_target, is_leader):
+    global _last_heartbeat_ts
+
+    now = time.time()
+    if now - _last_heartbeat_ts < HEARTBEAT_SEC:
+        return
+
+    _last_heartbeat_ts = now
+
+    mode = "SIM" if DRY_RUN else "LIVE"
+    target_str = f"{sell_target:.2f}" if sell_target is not None else "None"
+    avg_str = f"{avg_entry:.2f}" if avg_entry is not None else "None"
+
+    logger.warning("")
+    logger.warning("💓 HEARTBEAT")
+    logger.warning("----------------------------------------------")
+    logger.warning(f"MODE:        {mode}")
+    logger.warning(f"SYMBOL:      {SYMBOL}")
+    logger.warning(f"POS_QTY:    {int(pos_qty)}")
+    logger.warning(f"AVG_ENTRY:  {avg_str}")
+    logger.warning(f"SELL_PCT:   {SELL_PCT * 100:.3f}%")
+    logger.warning(f"SELL_TGT:   {target_str}")
+    logger.warning(f"LEADER:     {is_leader}")
+    logger.warning(f"KILL_SW:    {KILL_SWITCH}")
+    logger.warning("----------------------------------------------")
+    logger.warning("")
+
+# =========================
 # Env parsing helpers
 # =========================
 _NUM_RE = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)")
@@ -627,6 +681,11 @@ def main():
     live_endpoint = is_live_endpoint(ALPACA_BASE_URL)
 
     logger.info(f"ENGINE_START mode=RED_CLOSE_GROUP_SELL_AVG_ENTRY_PCT dry_run={DRY_RUN} symbol={SYMBOL}")
+    print_startup_banner(
+        live_endpoint=live_endpoint,
+        is_leader=is_leader
+    )
+
     logger.info(
         "ENGINE_CONFIG "
         f"symbol={SYMBOL} order_qty={ORDER_QTY} poll_sec={POLL_SEC} "
@@ -823,6 +882,12 @@ def main():
             sell_target = None
             if int(pos_qty) > 0 and avg_entry is not None and float(SELL_PCT) > 0:
                 sell_target = float(avg_entry) * (1.0 + float(SELL_PCT))
+            maybe_print_heartbeat(
+                pos_qty=pos_qty,
+                avg_entry=avg_entry,
+                sell_target=sell_target,
+                is_leader=is_leader
+            )
 
             logger.info(
                 f"BAR_CLOSE {SYMBOL} t={bar_ts.isoformat()} O={o:.2f} C={c:.2f} red={is_red} "
