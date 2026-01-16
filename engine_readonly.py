@@ -803,9 +803,10 @@ def main():
             pos_qty = get_position_qty(SYMBOL)
             avg_entry = get_position_avg_entry(SYMBOL) if pos_qty > 0 else None
 
+            # SELL target based on Alpaca position average (group average)
             sell_target = None
-            if group_anchor_close is not None:
-                sell_target = float(group_anchor_close) * (1.0 + float(SELL_PCT))
+            if avg_entry is not None and float(SELL_PCT) > 0:
+                sell_target = float(avg_entry) * (1.0 + float(SELL_PCT))
 
             owned_qty = get_owned_qty(state)
             
@@ -840,8 +841,8 @@ def main():
 
             buys_this_tick = 0
                     
-            # SELL trigger
-            if group_anchor_close is not None and sell_target is not None:
+            # SELL trigger (based on avg_entry)
+            if sell_target is not None:
                 if int(pos_qty) > 0 and owned_qty > 0 and c >= float(sell_target):
                     sell_qty = min(int(pos_qty), int(owned_qty))
 
