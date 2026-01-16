@@ -62,7 +62,6 @@ def print_startup_banner(*, live_endpoint: bool, is_leader: bool):
     logger.warning("==============================================")
     logger.warning("")
 
-
 def maybe_print_heartbeat(*, pos_qty, avg_entry, sell_target, is_leader):
     global _last_heartbeat_ts
 
@@ -89,6 +88,26 @@ def maybe_print_heartbeat(*, pos_qty, avg_entry, sell_target, is_leader):
     logger.warning(f"KILL_SW:    {KILL_SWITCH}")
     logger.warning("----------------------------------------------")
     logger.warning("")
+    
+def print_first_buy_banner(*, live_endpoint: bool, is_leader: bool, symbol: str, close: float, qty: int, avg_entry, sell_pct: float, sell_target):
+    mode = "SIMULATION (DRY_RUN)" if DRY_RUN else ("LIVE PAPER" if not live_endpoint else "LIVE REAL MONEY")
+    orders = "ENABLED" if (is_leader and not KILL_SWITCH) else "BLOCKED"
+
+    logger.warning("✅ FIRST BUY CONFIRMED")
+    logger.warning("----------------------------------------------")
+    logger.warning(f"MODE:     {mode}")
+    logger.warning(f"ORDERS:   {orders}")
+    logger.warning(f"SYMBOL:   {symbol}")
+    logger.warning(f"BUY_CLS:  {close:.2f}")
+    logger.warning(f"BUY_QTY:  {qty}")
+    if avg_entry is not None:
+        logger.warning(f"AVG_ENT:  {float(avg_entry):.2f}")
+    logger.warning(f"SELL_PCT: {float(sell_pct) * 100:.3f}%")
+    if sell_target is not None:
+        logger.warning(f"SELL_TGT: {float(sell_target):.2f}")
+    logger.warning(f"LEADER:   {is_leader}")
+    logger.warning(f"KILL_SW:  {KILL_SWITCH}")
+    logger.warning("----------------------------------------------")
 
 # =========================
 # Env parsing helpers
@@ -753,6 +772,7 @@ def main():
     state.setdefault("sim_owned_qty", 0)
     state.setdefault("buys_today_et", 0)
     state.setdefault("buys_today_date_et", None)
+    state.setdefault("first_buy_banner_shown", False)
 
     if DRY_RUN and RESET_SIM_OWNED_ON_START:
         old_sim = int(state.get("sim_owned_qty", 0))
@@ -876,6 +896,7 @@ def main():
                 last_red_buy_close = None
                 group_buy_count = 0
                 state["strategy_owned_qty"] = 0
+                state["first_buy_banner_shown"] = False
 
             # Owned qty after any reset
             owned_qty = get_owned_qty(state)
@@ -1031,6 +1052,21 @@ def main():
 
                         last_red_buy_close = float(c)
                         logger.info(f"RED_BUY_MEMORY_UPDATE last_red_buy_close={last_red_buy_close:.2f}")
+                        
+                        # FIRST BUY banner (one-time per group)
+                        if group_buy_count == 1 and not state.get("first_buy_banner_shown", False):
+                            print_first_buy_banner(
+                                live_endpoint=live_endpoint,
+                                is_leader=is_leader,
+                                symbol=SYMBOL,
+                                close=c,
+                                qty=ORDER_QTY,
+                                avg_entry=avg_entry,
+                                sell_pct=SELL_PCT,
+                                sell_target=sell_target,
+                            )
+                            state["first_buy_banner_shown"] = True
+
                 else:
                     logger.info(f"RED_SKIP reason={reason} close={c:.2f} last_red_buy_close={last_red_buy_close}")
 
