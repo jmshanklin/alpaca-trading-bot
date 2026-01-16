@@ -108,6 +108,51 @@ def print_first_buy_banner(*, live_endpoint: bool, is_leader: bool, symbol: str,
     logger.warning(f"LEADER:   {is_leader}")
     logger.warning(f"KILL_SW:  {KILL_SWITCH}")
     logger.warning("----------------------------------------------")
+    
+def print_sell_arming_banner(
+    *,
+    symbol: str,
+    close_price: float,
+    avg_entry: Optional[float],
+    sell_target: float,
+    arm_price: float,
+    leader: bool,
+    dry_run: bool,
+):
+    logger.warning("⚠️  SELL ARMING")
+    logger.warning("------------------------------------------------")
+    logger.warning(f"SYMBOL:    {symbol}")
+    logger.warning(f"CLOSE:     {close_price:.2f}")
+    if avg_entry is not None:
+        logger.warning(f"AVG_ENTRY: {avg_entry:.2f}")
+    logger.warning(f"TARGET:    {sell_target:.2f}")
+    logger.warning(f"ARM_AT:    {arm_price:.2f}")
+    logger.warning(f"LEADER:    {leader}")
+    logger.warning(f"DRY_RUN:   {dry_run}")
+    logger.warning("------------------------------------------------")
+    
+def print_sell_banner(
+    *,
+    symbol: str,
+    sell_qty: int,
+    close_price: float,
+    avg_entry: Optional[float],
+    sell_target: Optional[float],
+    pos_qty_before: float,
+    leader: bool,
+    dry_run: bool,
+):
+    logger.warning("✅ SELL CONFIRMED")
+    logger.warning("----------------------------------------------")
+    logger.warning(f"SYMBOL:      {symbol}")
+    logger.warning(f"SELL_QTY:    {sell_qty}")
+    logger.warning(f"CLOSE:       {close_price:.2f}")
+    logger.warning(f"POS_BEFORE:  {pos_qty_before:.4f}")
+    logger.warning(f"AVG_ENTRY:   {(f'{avg_entry:.2f}' if avg_entry is not None else 'None')}")
+    logger.warning(f"SELL_TGT:    {(f'{sell_target:.2f}' if sell_target is not None else 'None')}")
+    logger.warning(f"LEADER:      {leader}")
+    logger.warning(f"DRY_RUN:     {dry_run}")
+    logger.warning("----------------------------------------------")
 
 # =========================
 # Env parsing helpers
@@ -251,6 +296,9 @@ LOG_POSITION_CHANGES = env_bool("LOG_POSITION_CHANGES", True)
 
 STATE_SAVE_SEC = env_float("STATE_SAVE_SEC", 0.0)
 SELL_PCT = env_float("SELL_PCT", 0.0)
+
+SELL_ARM_BANNER = env_bool("SELL_ARM_BANNER", True)
+SELL_ARM_PCT = env_float("SELL_ARM_PCT", 0.0005)  # 0.05% below target
 
 RESET_SIM_OWNED_ON_START = env_bool("RESET_SIM_OWNED_ON_START", False)
 
@@ -773,6 +821,8 @@ def main():
     state.setdefault("buys_today_et", 0)
     state.setdefault("buys_today_date_et", None)
     state.setdefault("first_buy_banner_shown", False)
+    state.setdefault("sell_banner_shown", False)
+    state.setdefault("sell_arm_banner_shown", False)
 
     if DRY_RUN and RESET_SIM_OWNED_ON_START:
         old_sim = int(state.get("sim_owned_qty", 0))
@@ -897,6 +947,8 @@ def main():
                 group_buy_count = 0
                 state["strategy_owned_qty"] = 0
                 state["first_buy_banner_shown"] = False
+                state["sell_banner_shown"] = False
+                state["sell_arm_banner_shown"] = False
 
             # Owned qty after any reset
             owned_qty = get_owned_qty(state)
@@ -921,14 +973,40 @@ def main():
             )
 
             buys_this_tick = 0
+            
+            # SELL ARMING banner (one-time when close approaches sell_target)
+            if SELL_ARM_BANNER and sell_target is not None and int(pos_qty) > 0:
+                arm_price = float(sell_target) * (1.0 - float(SELL_ARM_PCT))
+                if (not state.get("sell_arm_banner_shown", False)) and float(c) >= arm_price and float(c) < float(sell_target):
+                    print_sell_arming_banner(
+                        symbol=SYMBOL,
+                        close_price=float(c),
+                        avg_entry=(float(avg_entry) if avg_entry is not None else None),
+                        sell_target=float(sell_target),
+                        arm_price=float(arm_price),
+                        leader=bool(is_leader),
+                        dry_run=bool(DRY_RUN),
+                    )
+                    state["sell_arm_banner_shown"] = True
 
             # =========================
             # SELL trigger (avg_entry-based)
             # =========================
             if sell_target is not None:
                 if int(pos_qty) > 0 and (owned_qty > 0 or (not DRY_RUN)) and c >= float(sell_target):
-                    sell_qty = int(pos_qty) if not DRY_RUN else min(int(pos_qty), int(owned_qty))
-
+                    sell_qty = int(pos_qty) if not DRY_RUN else min(int(pos_qty), int(owned_qty)) 
+                if not state.get("sell_banner_shown", False):    
+                    print_sell_banner(
+                        symbol=SYMBOL,
+                        sell_qty=int(sell_qty),
+                        close_price=float(c),
+                        avg_entry=(float(avg_entry) if avg_entry is not None else None),
+                        sell_target=(float(sell_target) if sell_target is not None else None),
+                        pos_qty_before=float(pos_qty),
+                        leader=bool(is_leader),
+                        dry_run=bool(DRY_RUN),
+                    )
+                    state["sell_banner_shown"] = True
                     if DRY_RUN:
                         logger.info(
                             f"SIM_SELL_OWNED close={c:.2f} avg_entry={float(avg_entry):.2f} target={float(sell_target):.2f} "
@@ -964,6 +1042,8 @@ def main():
                     group_anchor_close = None
                     last_red_buy_close = None
                     group_buy_count = 0
+                    state["sell_banner_shown"] = False
+                    state["sell_arm_banner_shown"] = False
 
             # =========================
             # BUY trigger
