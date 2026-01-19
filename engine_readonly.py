@@ -7,7 +7,7 @@ import random
 import re
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from typing import Callable, TypeVar, Optional
+from typing import Callable, TypeVar, Optional, Tuple
 
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame
@@ -15,6 +15,7 @@ from alpaca_trade_api.rest import TimeFrame
 # Postgres (for resilient v1 state + leader lock)
 import psycopg2
 from psycopg2.extras import Json
+
 
 # =========================
 # Logging in Central Time
@@ -112,169 +113,17 @@ def print_profit_tracker_banner(
     logger.warning(f"LEADER:      {is_leader}")
     logger.warning(f"POS_QTY:     {int(float(pos_qty)) if pos_qty is not None else 0}")
 
-    if avg_entry is not None:
-        logger.warning(f"AVG_ENTRY:   {float(avg_entry):.2f}")
-    else:
-        logger.warning("AVG_ENTRY:   None")
-
-    if current_price is not None:
-        logger.warning(f"LAST_PRICE:  {float(current_price):.2f}")
-    else:
-        logger.warning("LAST_PRICE:  None")
-
-    if market_value is not None:
-        logger.warning(f"MKT_VALUE:   ${float(market_value):,.2f}")
-    else:
-        logger.warning("MKT_VALUE:   None")
-
-    if unrealized_pl is not None:
-        logger.warning(f"UNRLZD_P/L:  ${float(unrealized_pl):,.2f}")
-    else:
-        logger.warning("UNRLZD_P/L:  None")
-
-    if unrealized_plpc is not None:
-        logger.warning(f"UNRLZD_%:    {float(unrealized_plpc) * 100.0:.3f}%")
-    else:
-        logger.warning("UNRLZD_%:    None")
+    logger.warning(f"AVG_ENTRY:   {float(avg_entry):.2f}" if avg_entry is not None else "AVG_ENTRY:   None")
+    logger.warning(f"LAST_PRICE:  {float(current_price):.2f}" if current_price is not None else "LAST_PRICE:  None")
+    logger.warning(f"MKT_VALUE:   ${float(market_value):,.2f}" if market_value is not None else "MKT_VALUE:   None")
+    logger.warning(f"UNRLZD_P/L:  ${float(unrealized_pl):,.2f}" if unrealized_pl is not None else "UNRLZD_P/L:  None")
+    logger.warning(f"UNRLZD_%:    {float(unrealized_plpc) * 100.0:.3f}%" if unrealized_plpc is not None else "UNRLZD_%:    None")
 
     logger.warning(f"SELL_PCT:    {float(sell_pct) * 100.0:.3f}%")
-
-    if sell_target is not None:
-        logger.warning(f"SELL_TGT:    {float(sell_target):.2f}")
-    else:
-        logger.warning("SELL_TGT:    None")
-
+    logger.warning(f"SELL_TGT:    {float(sell_target):.2f}" if sell_target is not None else "SELL_TGT:    None")
     logger.warning("------------------------------------------------")
     logger.warning("")
 
-def print_daily_summary_banner(
-    *,
-    symbol: str,
-    date_et: str,
-    is_leader: bool,
-    dry_run: bool,
-    pos_qty: float,
-    owned_qty: int,
-    avg_entry: Optional[float],
-    sell_pct: float,
-    sell_target: Optional[float],
-    buy_count_total: int,
-    group_buy_count: int,
-    buys_today_et: int,
-    unrealized_pl: Optional[float],
-    unrealized_plpc: Optional[float],
-    market_value: Optional[float],
-):
-    mode = "SIMULATION (DRY_RUN)" if dry_run else "LIVE (Paper/Live)"
-
-    logger.warning("")
-    logger.warning("📅 DAILY SUMMARY (Market Close)")
-    logger.warning("------------------------------------------------")
-    logger.warning(f"DATE_ET:       {date_et}")
-    logger.warning(f"MODE:          {mode}")
-    logger.warning(f"SYMBOL:        {symbol}")
-    logger.warning(f"LEADER:        {is_leader}")
-    logger.warning(f"POS_QTY:       {int(pos_qty)}")
-    logger.warning(f"OWNED_QTY:     {int(owned_qty)}")
-
-    if avg_entry is not None:
-        logger.warning(f"AVG_ENTRY:     {float(avg_entry):.2f}")
-    else:
-        logger.warning("AVG_ENTRY:     None")
-
-    logger.warning(f"SELL_PCT:      {float(sell_pct) * 100.0:.3f}%")
-    if sell_target is not None:
-        logger.warning(f"SELL_TARGET:   {float(sell_target):.2f}")
-    else:
-        logger.warning("SELL_TARGET:   None")
-
-    logger.warning(f"BUYS_TODAY_ET: {int(buys_today_et)}")
-    logger.warning(f"BUY_COUNT_TTL: {int(buy_count_total)}")
-    logger.warning(f"GROUP_BUY_CNT: {int(group_buy_count)}")
-
-    # If live, include unrealized P/L snapshot (if available)
-    if (not dry_run) and (unrealized_pl is not None):
-        logger.warning(f"UNRLZD_P/L:    ${float(unrealized_pl):,.2f}")
-    else:
-        logger.warning("UNRLZD_P/L:    None")
-
-    if (not dry_run) and (unrealized_plpc is not None):
-        logger.warning(f"UNRLZD_%:      {float(unrealized_plpc) * 100.0:.3f}%")
-    else:
-        logger.warning("UNRLZD_%:      None")
-
-    if (not dry_run) and (market_value is not None):
-        logger.warning(f"MKT_VALUE:     ${float(market_value):,.2f}")
-    else:
-        logger.warning("MKT_VALUE:     None")
-
-    logger.warning("------------------------------------------------")
-    logger.warning("")
-
-
-def maybe_print_daily_summary_banner(
-    *,
-    state: dict,
-    now_utc: datetime,
-    is_leader: bool,
-    symbol: str,
-    pos_qty: float,
-    owned_qty: int,
-    avg_entry: Optional[float],
-    sell_pct: float,
-    sell_target: Optional[float],
-    buy_count_total: int,
-    group_buy_count: int,
-    buys_today_et: int,
-    unrealized_pl: Optional[float],
-    unrealized_plpc: Optional[float],
-    market_value: Optional[float],
-):
-    if not DAILY_SUMMARY_BANNER:
-        return
-
-    # Convert to ET and compute "today" string
-    now_et = now_utc.astimezone(ET)
-    date_et = now_et.date().isoformat()
-
-    # Only once per ET day
-    if state.get("last_daily_summary_date_et") == date_et:
-        return
-
-    # Trigger time (defaults to 15:59 ET)
-    hhmm = parse_hhmm(DAILY_SUMMARY_ET_TIME)
-    if not hhmm:
-        return
-    target_h, target_m = hhmm
-
-    # Fire within a small window so we don't miss it due to loop timing
-    target_minutes = target_h * 60 + target_m
-    now_minutes = now_et.hour * 60 + now_et.minute
-
-    # 0..5 minute window starting at the target time
-    if not (target_minutes <= now_minutes <= target_minutes + 5):
-        return
-
-    # Mark as printed BEFORE logging (so restarts don't spam)
-    state["last_daily_summary_date_et"] = date_et
-
-    print_daily_summary_banner(
-        symbol=symbol,
-        date_et=date_et,
-        is_leader=is_leader,
-        dry_run=bool(DRY_RUN),
-        pos_qty=pos_qty,
-        owned_qty=owned_qty,
-        avg_entry=avg_entry,
-        sell_pct=sell_pct,
-        sell_target=sell_target,
-        buy_count_total=buy_count_total,
-        group_buy_count=group_buy_count,
-        buys_today_et=buys_today_et,
-        unrealized_pl=unrealized_pl,
-        unrealized_plpc=unrealized_plpc,
-        market_value=market_value,
-    )
 
 def maybe_print_profit_tracker_banner(
     *,
@@ -319,6 +168,127 @@ def maybe_print_profit_tracker_banner(
     )
 
 
+def print_daily_summary_banner(
+    *,
+    symbol: str,
+    date_et: str,
+    is_leader: bool,
+    dry_run: bool,
+    pos_qty: float,
+    owned_qty: int,
+    avg_entry: Optional[float],
+    sell_pct: float,
+    sell_target: Optional[float],
+    buy_count_total: int,
+    group_buy_count: int,
+    buys_today_et: int,
+    unrealized_pl: Optional[float],
+    unrealized_plpc: Optional[float],
+    market_value: Optional[float],
+):
+    mode = "SIMULATION (DRY_RUN)" if dry_run else "LIVE (Paper/Live)"
+
+    logger.warning("")
+    logger.warning("📅 DAILY SUMMARY (Market Close)")
+    logger.warning("------------------------------------------------")
+    logger.warning(f"DATE_ET:       {date_et}")
+    logger.warning(f"MODE:          {mode}")
+    logger.warning(f"SYMBOL:        {symbol}")
+    logger.warning(f"LEADER:        {is_leader}")
+    logger.warning(f"POS_QTY:       {int(pos_qty)}")
+    logger.warning(f"OWNED_QTY:     {int(owned_qty)}")
+    logger.warning(f"AVG_ENTRY:     {float(avg_entry):.2f}" if avg_entry is not None else "AVG_ENTRY:     None")
+    logger.warning(f"SELL_PCT:      {float(sell_pct) * 100.0:.3f}%")
+    logger.warning(f"SELL_TARGET:   {float(sell_target):.2f}" if sell_target is not None else "SELL_TARGET:   None")
+    logger.warning(f"BUYS_TODAY_ET: {int(buys_today_et)}")
+    logger.warning(f"BUY_COUNT_TTL: {int(buy_count_total)}")
+    logger.warning(f"GROUP_BUY_CNT: {int(group_buy_count)}")
+
+    if (not dry_run) and (unrealized_pl is not None):
+        logger.warning(f"UNRLZD_P/L:    ${float(unrealized_pl):,.2f}")
+    else:
+        logger.warning("UNRLZD_P/L:    None")
+
+    if (not dry_run) and (unrealized_plpc is not None):
+        logger.warning(f"UNRLZD_%:      {float(unrealized_plpc) * 100.0:.3f}%")
+    else:
+        logger.warning("UNRLZD_%:      None")
+
+    if (not dry_run) and (market_value is not None):
+        logger.warning(f"MKT_VALUE:     ${float(market_value):,.2f}")
+    else:
+        logger.warning("MKT_VALUE:     None")
+
+    logger.warning("------------------------------------------------")
+    logger.warning("")
+
+
+def maybe_print_daily_summary_banner(
+    *,
+    state: dict,
+    now_utc: datetime,
+    is_leader: bool,
+    symbol: str,
+    pos_qty: float,
+    owned_qty: int,
+    avg_entry: Optional[float],
+    sell_pct: float,
+    sell_target: Optional[float],
+    buy_count_total: int,
+    group_buy_count: int,
+    buys_today_et: int,
+    unrealized_pl: Optional[float],
+    unrealized_plpc: Optional[float],
+    market_value: Optional[float],
+) -> bool:
+    """
+    Returns True if it printed (so caller can persist immediately).
+    """
+    if not DAILY_SUMMARY_BANNER:
+        return False
+
+    now_et = now_utc.astimezone(ET)
+    date_et = now_et.date().isoformat()
+
+    # Only once per ET day
+    if state.get("last_daily_summary_date_et") == date_et:
+        return False
+
+    hhmm = parse_hhmm(DAILY_SUMMARY_ET_TIME)
+    if not hhmm:
+        return False
+    target_h, target_m = hhmm
+
+    target_minutes = target_h * 60 + target_m
+    now_minutes = now_et.hour * 60 + now_et.minute
+
+    # 0..5 minute window starting at the target time
+    if not (target_minutes <= now_minutes <= target_minutes + 5):
+        return False
+
+    # Mark as printed BEFORE logging (avoids spam on restarts)
+    state["last_daily_summary_date_et"] = date_et
+
+    print_daily_summary_banner(
+        symbol=symbol,
+        date_et=date_et,
+        is_leader=is_leader,
+        dry_run=bool(DRY_RUN),
+        pos_qty=pos_qty,
+        owned_qty=owned_qty,
+        avg_entry=avg_entry,
+        sell_pct=sell_pct,
+        sell_target=sell_target,
+        buy_count_total=buy_count_total,
+        group_buy_count=group_buy_count,
+        buys_today_et=buys_today_et,
+        unrealized_pl=unrealized_pl,
+        unrealized_plpc=unrealized_plpc,
+        market_value=market_value,
+    )
+    return True
+
+
 def print_first_buy_banner(
     *,
     live_endpoint: bool,
@@ -326,9 +296,9 @@ def print_first_buy_banner(
     symbol: str,
     close: float,
     qty: int,
-    avg_entry,
+    avg_entry: Optional[float],
     sell_pct: float,
-    sell_target,
+    sell_target: Optional[float],
 ):
     mode = "SIMULATION (DRY_RUN)" if DRY_RUN else ("LIVE PAPER" if not live_endpoint else "LIVE REAL MONEY")
     orders = "ENABLED" if (is_leader and not KILL_SWITCH) else "BLOCKED"
@@ -453,7 +423,6 @@ def alpaca_call_with_retry(
             return fn()
         except Exception as e:
             msg = str(e).lower()
-
             transient = (
                 "internal server error" in msg
                 or "service unavailable" in msg
@@ -591,7 +560,7 @@ def is_live_endpoint(url: str) -> bool:
     return "api.alpaca.markets" in u
 
 
-def parse_hhmm(s: str):
+def parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
     try:
         if not s:
             return None
@@ -835,75 +804,118 @@ def maybe_persist_state(state: dict, payload: dict, *, db_conn=None, state_id: s
 # =========================
 # Trading helpers
 # =========================
+def _is_transient_msg(msg: str) -> bool:
+    m = (msg or "").lower()
+    return (
+        "internal server error" in m
+        or "service unavailable" in m
+        or "bad gateway" in m
+        or "gateway timeout" in m
+        or "timed out" in m
+        or "timeout" in m
+        or "connection reset" in m
+        or "temporarily unavailable" in m
+    )
+
+
 def get_position(symbol: str):
     """
     Returns Alpaca position object or None if no position exists.
 
-    HARDENED:
-    - "position does not exist" => normal flat, return None
-    - transient errors => retry using alpaca_call_with_retry
-    - other unexpected errors => raise (so we don't incorrectly assume flat)
+    HARDENED (fixes your log spam):
+    - "position does not exist" => normal flat, return None (NO retries, NO errors)
+    - transient errors => retry a few times
+    - other errors => raise (so we don't mistakenly treat unknown as flat)
     """
-    def _fetch():
-        return api.get_position(symbol)
+    tries = 5
+    base_sleep = 0.4
+    max_sleep = 3.0
 
-    try:
-        return alpaca_call_with_retry(_fetch, label="get_position", tries=5, base_sleep=0.4, max_sleep=3.0)
-    except Exception as e:
-        msg = str(e).lower()
-        if "position does not exist" in msg:
+    for attempt in range(1, tries + 1):
+        try:
+            return api.get_position(symbol)
+        except Exception as e:
+            msg = str(e).lower()
+
+            # Normal condition when flat
+            if "position does not exist" in msg:
+                return None
+
+            # Retry only if transient
+            if _is_transient_msg(msg) and attempt < tries:
+                sleep_s = min(max_sleep, base_sleep * (2 ** (attempt - 1)))
+                sleep_s = sleep_s * (0.8 + 0.4 * random.random())
+                logger.warning(f"get_position: transient attempt {attempt}/{tries}: {e} | sleeping {sleep_s:.2f}s")
+                time.sleep(sleep_s)
+                continue
+
+            # Unknown/fatal -> do NOT treat as flat
+            logger.error(f"get_position: unexpected error (NOT treating as flat): {e}", exc_info=True)
+            raise
+
+    raise RuntimeError("get_position: failed after retries")  # should be unreachable
+
+
+def fetch_position_snapshot(symbol: str):
+    """
+    Single call to Alpaca for position, returns derived fields.
+    """
+    pos_obj = get_position(symbol)
+    if not pos_obj:
+        return {
+            "pos_obj": None,
+            "pos_qty": 0.0,
+            "avg_entry": None,
+            "unrealized_pl": None,
+            "unrealized_plpc": None,
+            "market_value": None,
+            "current_price": None,
+        }
+
+    def _f(attr):
+        try:
+            v = getattr(pos_obj, attr, None)
+            return float(v) if v is not None else None
+        except Exception:
             return None
-        # Anything else is NOT safe to treat as "flat"
-        logger.error(f"get_position: unexpected error (NOT treating as flat): {e}", exc_info=True)
-        raise
+
+    qty = _f("qty") or 0.0
+    avg_entry = _f("avg_entry_price")
+    return {
+        "pos_obj": pos_obj,
+        "pos_qty": qty,
+        "avg_entry": avg_entry,
+        "unrealized_pl": _f("unrealized_pl"),
+        "unrealized_plpc": _f("unrealized_plpc"),
+        "market_value": _f("market_value"),
+        "current_price": _f("current_price"),
+    }
+
 
 def get_position_qty(symbol: str) -> float:
-    pos = get_position(symbol)
-    if not pos:
-        return 0.0
-    try:
-        return float(pos.qty)
-    except Exception:
-        return 0.0
-        
+    snap = fetch_position_snapshot(symbol)
+    return float(snap["pos_qty"])
+
+
 def confirm_flat_position(symbol: str, *, checks: int = 2, delay_sec: float = 0.25) -> bool:
     """
-    HARDENED flat check: only returns True if Alpaca is consistently flat.
-    If any check errors, we do NOT reset (returns False).
+    HARDENED flat check:
+    - returns True only if Alpaca is consistently flat
+    - if any check errors, returns False (do NOT reset anything)
     """
     for i in range(checks):
         try:
-            pos = get_position(symbol)
+            snap = fetch_position_snapshot(symbol)
         except Exception:
-            # Unknown state; do NOT reset anything
             return False
 
-        qty = 0.0
-        if pos is not None:
-            try:
-                qty = float(getattr(pos, "qty", 0.0))
-            except Exception:
-                qty = 0.0
-
-        if qty != 0.0:
+        if float(snap["pos_qty"]) != 0.0:
             return False
 
         if i < checks - 1:
             time.sleep(delay_sec)
 
     return True
-
-def get_position_avg_entry(symbol: str):
-    pos = get_position(symbol)
-    if not pos:
-        return None
-    avg = getattr(pos, "avg_entry_price", None)
-    if avg is None:
-        return None
-    try:
-        return float(avg)
-    except Exception:
-        return None
 
 
 def submit_market_buy(symbol: str, qty: int):
@@ -1068,13 +1080,14 @@ def main():
     state.setdefault("first_buy_banner_shown", False)
     state.setdefault("sell_banner_shown", False)
     state.setdefault("sell_arm_banner_shown", False)
-    state.setdefault("last_profit_banner_ts", 0.0)  # ✅ required for profit tracker throttle
+
+    state.setdefault("last_profit_banner_ts", 0.0)
     state.setdefault("last_daily_summary_date_et", None)
 
     if DRY_RUN and RESET_SIM_OWNED_ON_START:
         old_sim = int(state.get("sim_owned_qty", 0))
         if old_sim != 0:
-            logger.info(f"RESET_SIM_OWNED_ON_START enabled → sim_owned_qty {old_sim} → 0")
+            logger.info(f"RESET_SIM_OWNED_ON_START enabled -> sim_owned_qty {old_sim} -> 0")
         state["sim_owned_qty"] = 0
 
     logger.info(
@@ -1084,40 +1097,37 @@ def main():
         f"strategy_owned_qty={int(state.get('strategy_owned_qty', 0))} sim_owned_qty={int(state.get('sim_owned_qty', 0))} "
         f"buys_today_date_et={state.get('buys_today_date_et')} buys_today_et={int(state.get('buys_today_et', 0))}"
     )
-    
+
     # ------------------------------------------------------------
     # BOOT-TIME RECONCILE (DB state -> Alpaca reality)
-    # If Alpaca is flat, wipe any persisted "group/counter" memory
-    # so the bot starts clean even after-hours.
+    # If Alpaca is flat, wipe persisted group memory + counters
+    # so the bot starts clean after manual liquidation.
     # ------------------------------------------------------------
-    boot_pos_qty = get_position_qty(SYMBOL)
+    try:
+        boot_snap = fetch_position_snapshot(SYMBOL)
+        boot_pos_qty = float(boot_snap["pos_qty"])
+    except Exception:
+        boot_pos_qty = -1.0  # unknown
 
     if int(boot_pos_qty) == 0:
-        logger.warning(
-            "BOOT_RECONCILE: Alpaca position is 0 -> clearing persisted state counters + group memory"
-        )
+        logger.warning("BOOT_RECONCILE: Alpaca position is 0 -> clearing persisted state counters + group memory")
 
-        # clear group memory
         reset_group_state(state)
         group_anchor_close = None
         last_red_buy_close = None
         group_buy_count = 0
 
-        # clear counters (so logs match Alpaca reality)
         state["buy_count_total"] = 0
         state["buys_today_et"] = 0
         state["buys_today_date_et"] = et_date_str(datetime.now(timezone.utc))
 
-        # clear owned qty trackers
         state["strategy_owned_qty"] = 0
         state["sim_owned_qty"] = 0
 
-        # reset banners
         state["first_buy_banner_shown"] = False
         state["sell_banner_shown"] = False
         state["sell_arm_banner_shown"] = False
 
-        # persist immediately so next startup is clean too
         payload = {
             "last_bar_ts": state.get("last_bar_ts"),
             "group_anchor_close": None,
@@ -1129,20 +1139,74 @@ def main():
             "buys_today_date_et": state["buys_today_date_et"],
             "buys_today_et": 0,
             "symbol": SYMBOL,
+            "last_profit_banner_ts": float(state.get("last_profit_banner_ts", 0.0)),
+            "last_daily_summary_date_et": state.get("last_daily_summary_date_et"),
+            "first_buy_banner_shown": bool(state.get("first_buy_banner_shown", False)),
+            "sell_banner_shown": bool(state.get("sell_banner_shown", False)),
+            "sell_arm_banner_shown": bool(state.get("sell_arm_banner_shown", False)),
         }
         maybe_persist_state(state, payload, db_conn=db_conn, state_id=state_id)
 
     # Position-change baseline
     last_pos_qty = None
     if LOG_POSITION_CHANGES:
-        last_pos_qty = get_position_qty(SYMBOL)
-        logger.info(f"POSITION_INIT qty={last_pos_qty:.4f}")
+        try:
+            last_pos_qty = float(fetch_position_snapshot(SYMBOL)["pos_qty"])
+        except Exception:
+            last_pos_qty = None
+        logger.info(f"POSITION_INIT qty={(last_pos_qty or 0.0):.4f}")
 
     while True:
         try:
             clock = alpaca_call_with_retry(lambda: api.get_clock(), label="get_clock")
             market_is_open = bool(clock.is_open)
 
+            now_utc = clock.timestamp
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+            # Always compute owned_qty from state (fixes your NameError/undefined usage)
+            owned_qty = get_owned_qty(state)
+
+            # Always get a position snapshot once per loop (reduces API calls and inconsistency)
+            snap = fetch_position_snapshot(SYMBOL)
+            pos_qty = float(snap["pos_qty"])
+            avg_entry = snap["avg_entry"]
+            unrealized_pl = snap["unrealized_pl"]
+            unrealized_plpc = snap["unrealized_plpc"]
+            market_value = snap["market_value"]
+            current_price = snap["current_price"]
+
+            # SELL target based on Alpaca avg entry
+            sell_target = None
+            if int(pos_qty) > 0 and avg_entry is not None and float(SELL_PCT) > 0:
+                sell_target = float(avg_entry) * (1.0 + float(SELL_PCT))
+
+            # Daily summary should work AFTER CLOSE too (your previous version couldn't run when closed)
+            printed_daily = maybe_print_daily_summary_banner(
+                state=state,
+                now_utc=now_utc,
+                is_leader=is_leader,
+                symbol=SYMBOL,
+                pos_qty=pos_qty,
+                owned_qty=owned_qty,
+                avg_entry=avg_entry,
+                sell_pct=SELL_PCT,
+                sell_target=sell_target,
+                buy_count_total=buy_count_total,
+                group_buy_count=group_buy_count,
+                buys_today_et=int(state.get("buys_today_et", 0)),
+                unrealized_pl=unrealized_pl,
+                unrealized_plpc=unrealized_plpc,
+                market_value=market_value,
+            )
+            if printed_daily:
+                payload = {"last_daily_summary_date_et": state.get("last_daily_summary_date_et")}
+                maybe_persist_state(state, payload, db_conn=db_conn, state_id=state_id)
+
+            # -------------------------
+            # Market closed branch
+            # -------------------------
             if not market_is_open:
                 if SELF_TEST:
                     run_self_test(api, SYMBOL, market_is_open=False)
@@ -1155,6 +1219,9 @@ def main():
                 time.sleep(30)
                 continue
 
+            # -------------------------
+            # Market open: optional self-test
+            # -------------------------
             if SELF_TEST:
                 run_self_test(api, SYMBOL, market_is_open=True)
                 if SELF_TEST_NO_ORDERS:
@@ -1162,7 +1229,9 @@ def main():
                 time.sleep(SELF_TEST_EVERY_SEC)
                 continue
 
+            # -------------------------
             # Leader lock handling
+            # -------------------------
             if db_conn is not None and not is_leader:
                 if STANDBY_ONLY:
                     time.sleep(STANDBY_POLL_SEC)
@@ -1174,10 +1243,6 @@ def main():
                     continue
                 logger.info("LEADER_LOCK acquired -> ACTIVE mode (orders allowed)")
 
-            now_utc = clock.timestamp
-            if now_utc.tzinfo is None:
-                now_utc = now_utc.replace(tzinfo=timezone.utc)
-
             # ET day rollover
             today_et = et_date_str(now_utc)
             if state.get("buys_today_date_et") != today_et:
@@ -1185,13 +1250,13 @@ def main():
                 state["buys_today_et"] = 0
                 logger.info(f"DAY_ROLLOVER_ET date={today_et} buys_today_et reset to 0")
 
+            # Position change logs (uses snapshot we already have)
             if LOG_POSITION_CHANGES:
-                pos_qty_now = get_position_qty(SYMBOL)
                 if last_pos_qty is None:
-                    last_pos_qty = pos_qty_now
-                elif pos_qty_now != last_pos_qty:
-                    logger.info(f"POSITION_CHANGE qty_from={last_pos_qty:.4f} qty_to={pos_qty_now:.4f}")
-                    last_pos_qty = pos_qty_now
+                    last_pos_qty = pos_qty
+                elif pos_qty != last_pos_qty:
+                    logger.info(f"POSITION_CHANGE qty_from={last_pos_qty:.4f} qty_to={pos_qty:.4f}")
+                    last_pos_qty = pos_qty
 
             b = pick_latest_closed_bar(SYMBOL, now_utc)
             if b is None:
@@ -1210,36 +1275,17 @@ def main():
             c = float(b.c)
             is_red = c < o
 
-            pos_qty = get_position_qty(SYMBOL)
-            avg_entry = get_position_avg_entry(SYMBOL) if pos_qty > 0 else None
-
-            # Pull live P/L fields
-            unrealized_pl = None
-            unrealized_plpc = None
-            market_value = None
-            current_price = None
-
-            pos_obj = get_position(SYMBOL)
-            if pos_obj:
-                try:
-                    unrealized_pl = float(getattr(pos_obj, "unrealized_pl", None))
-                except Exception:
-                    pass
-                try:
-                    unrealized_plpc = float(getattr(pos_obj, "unrealized_plpc", None))
-                except Exception:
-                    pass
-                try:
-                    market_value = float(getattr(pos_obj, "market_value", None))
-                except Exception:
-                    pass
-                try:
-                    current_price = float(getattr(pos_obj, "current_price", None))
-                except Exception:
-                    pass
-
-            # POSITION-AWARE RE-ARM
-            is_flat_confirmed = confirm_flat_position(SYMBOL, checks=2, delay_sec=0.25)
+            # -----------------------------------------
+            # POSITION-AWARE RE-ARM (IMPORTANT FIX)
+            # - In LIVE mode: if Alpaca is flat, clear group memory + owned trackers + banners
+            # - Do NOT zero buys_today_et or buy_count_total here (that would be inaccurate)
+            # - In DRY_RUN: don't use Alpaca flat check (it would constantly reset)
+            # -----------------------------------------
+            is_flat_confirmed = False
+            if DRY_RUN:
+                is_flat_confirmed = (get_owned_qty(state) == 0)
+            else:
+                is_flat_confirmed = confirm_flat_position(SYMBOL, checks=2, delay_sec=0.25)
 
             if is_flat_confirmed:
                 if (group_anchor_close is not None) or (last_red_buy_close is not None) or int(state.get("strategy_owned_qty", 0)) != 0:
@@ -1248,47 +1294,23 @@ def main():
                         f"(prev_anchor={group_anchor_close}, prev_last_red_buy_close={last_red_buy_close}, "
                         f"strategy_owned_qty={int(state.get('strategy_owned_qty', 0))})"
                     )
-            
+
                 reset_group_state(state)
                 group_anchor_close = None
                 last_red_buy_close = None
                 group_buy_count = 0
-            
-                # Keep internal tracking aligned with Alpaca reality
+
+                # keep internal trackers aligned with reality
                 state["strategy_owned_qty"] = 0
-                state["sim_owned_qty"] = 0
-                state["buys_today_et"] = 0
-            
+                if DRY_RUN:
+                    state["sim_owned_qty"] = 0
+
+                # reset banners
                 state["first_buy_banner_shown"] = False
                 state["sell_banner_shown"] = False
                 state["sell_arm_banner_shown"] = False
-            else:
-                # Optional: only log when pos_qty was 0 but we refused to reset due to uncertainty
-                if int(pos_qty) == 0:
-                    logger.warning("POS_QTY=0 but NOT confirmed flat (transient/unknown) -> NOT resetting state")
 
-            # SELL target based on Alpaca avg entry
-            sell_target = None
-            if int(pos_qty) > 0 and avg_entry is not None and float(SELL_PCT) > 0:
-                sell_target = float(avg_entry) * (1.0 + float(SELL_PCT))
-                
-            maybe_print_daily_summary_banner(
-                state=state,
-                now_utc=now_utc,
-                is_leader=is_leader,
-                symbol=SYMBOL,
-                pos_qty=pos_qty,
-                owned_qty=owned_qty,
-                avg_entry=avg_entry,
-                sell_pct=SELL_PCT,
-                sell_target=sell_target,
-                buy_count_total=buy_count_total,
-                group_buy_count=group_buy_count,
-                buys_today_et=int(state.get("buys_today_et", 0)),
-                unrealized_pl=unrealized_pl,
-                unrealized_plpc=unrealized_plpc,
-                market_value=market_value,
-            )
+                owned_qty = get_owned_qty(state)  # refresh
 
             # Profit tracker + heartbeat
             maybe_print_profit_tracker_banner(
@@ -1345,7 +1367,6 @@ def main():
                 if int(pos_qty) > 0 and (owned_qty > 0 or (not DRY_RUN)) and c >= float(sell_target):
                     sell_qty = int(pos_qty) if not DRY_RUN else min(int(pos_qty), int(owned_qty))
 
-                    # SELL banner (only when SELL triggers)
                     if not state.get("sell_banner_shown", False):
                         print_sell_banner(
                             symbol=SYMBOL,
@@ -1361,8 +1382,8 @@ def main():
 
                     if DRY_RUN:
                         logger.info(
-                            f"SIM_SELL_OWNED close={c:.2f} avg_entry={float(avg_entry):.2f} target={float(sell_target):.2f} "
-                            f"sell_qty={sell_qty} owned_qty={owned_qty} pos_qty={int(pos_qty)}"
+                            f"SIM_SELL_OWNED close={c:.2f} avg_entry={(float(avg_entry) if avg_entry else 0.0):.2f} "
+                            f"target={float(sell_target):.2f} sell_qty={sell_qty} owned_qty={owned_qty} pos_qty={int(pos_qty)}"
                         )
                         set_owned_qty(state, owned_qty - sell_qty)
                     else:
@@ -1424,7 +1445,7 @@ def main():
                         should_buy = False
 
                 if should_buy and MAX_POSITION_QTY > 0:
-                    current_pos = int(get_position_qty(SYMBOL))
+                    current_pos = int(pos_qty)
                     if current_pos + int(ORDER_QTY) > MAX_POSITION_QTY:
                         logger.warning(
                             f"BUY_BLOCKED would exceed MAX_POSITION_QTY={MAX_POSITION_QTY} "
@@ -1452,6 +1473,8 @@ def main():
                             group_anchor_close = float(c)
                             logger.info(f"GROUP_ANCHOR_SET group_anchor_close={group_anchor_close:.2f}")
 
+                        avg_entry_after = avg_entry
+
                         if DRY_RUN:
                             logger.info(
                                 f"SIM_BUY total#{buy_count_total} group#{group_buy_count} reason={reason} "
@@ -1459,11 +1482,9 @@ def main():
                             )
                             set_owned_qty(state, get_owned_qty(state) + ORDER_QTY)
                             state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
-                            avg_entry_after = avg_entry  # sim has no alpaca avg entry
                         else:
                             if db_conn is not None and not is_leader:
                                 logger.warning("STANDBY_BLOCK: skipping BUY (no leader lock)")
-                                avg_entry_after = avg_entry
                             else:
                                 logger.info(
                                     f"BUY_SIGNAL total#{buy_count_total} group#{group_buy_count} reason={reason} "
@@ -1485,19 +1506,20 @@ def main():
                                     pass
                                 set_owned_qty(state, get_owned_qty(state) + inc)
                                 state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
-                                avg_entry_after = get_position_avg_entry(SYMBOL)
+
+                                # refresh avg entry after fill
+                                try:
+                                    avg_entry_after = fetch_position_snapshot(SYMBOL)["avg_entry"]
+                                except Exception:
+                                    avg_entry_after = avg_entry
 
                         last_red_buy_close = float(c)
                         logger.info(f"RED_BUY_MEMORY_UPDATE last_red_buy_close={last_red_buy_close:.2f}")
 
-                        # Recompute sell_target (after buy) for banner accuracy
                         sell_target_after = None
-                        if (not DRY_RUN) and (avg_entry_after is not None) and float(SELL_PCT) > 0:
-                            sell_target_after = float(avg_entry_after) * (1.0 + float(SELL_PCT))
-                        elif DRY_RUN and (avg_entry_after is not None) and float(SELL_PCT) > 0:
+                        if avg_entry_after is not None and float(SELL_PCT) > 0:
                             sell_target_after = float(avg_entry_after) * (1.0 + float(SELL_PCT))
 
-                        # FIRST BUY banner (one-time per group)
                         if group_buy_count == 1 and not state.get("first_buy_banner_shown", False):
                             print_first_buy_banner(
                                 live_endpoint=live_endpoint,
@@ -1527,6 +1549,7 @@ def main():
                 "buys_today_et": int(state.get("buys_today_et", 0)),
                 "symbol": SYMBOL,
                 "last_profit_banner_ts": float(state.get("last_profit_banner_ts", 0.0)),
+                "last_daily_summary_date_et": state.get("last_daily_summary_date_et"),
                 "first_buy_banner_shown": bool(state.get("first_buy_banner_shown", False)),
                 "sell_banner_shown": bool(state.get("sell_banner_shown", False)),
                 "sell_arm_banner_shown": bool(state.get("sell_arm_banner_shown", False)),
