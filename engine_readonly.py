@@ -123,6 +123,151 @@ def print_profit_tracker_banner(
     logger.warning(f"SELL_TGT:    {float(sell_target):.2f}" if sell_target is not None else "SELL_TGT:    None")
     logger.warning("------------------------------------------------")
     logger.warning("")
+    
+def print_session_snapshot_line(
+    *,
+    symbol: str,
+    session_high: Optional[float],
+    session_low: Optional[float],
+    vwap_dist_pct: Optional[float],
+    unrealized_pl: Optional[float],
+    unrealized_plpc: Optional[float],
+    pos_qty: float,
+    is_leader: bool,
+):
+    hi = f"{session_high:.2f}" if session_high is not None else "—"
+    lo = f"{session_low:.2f}" if session_low is not None else "—"
+
+    if vwap_dist_pct is not None:
+        vwap_str = f"{vwap_dist_pct:+.3f}%"
+    else:
+        vwap_str = "—"
+
+    if unrealized_pl is not None:
+        pl_str = f"${unrealized_pl:,.2f}"
+    else:
+        pl_str = "—"
+
+    if unrealized_plpc is not None:
+        plpc_str = f"{unrealized_plpc * 100.0:+.2f}%"
+    else:
+        plpc_str = "—"
+
+    logger.warning(
+        f"📌 SNAPSHOT {symbol} | "
+        f"H:{hi} L:{lo} | "
+        f"VWAP:{vwap_str} | "
+        f"P/L:{pl_str} ({plpc_str}) | "
+        f"QTY:{int(pos_qty)} | "
+        f"LEADER:{is_leader}"
+    )
+    
+def compute_session_stats_1m(symbol: str, now_utc: datetime):
+    """
+    Returns:
+      session_high, session_low, vwap, vwap_dist_pct
+    VWAP computed from 1-min bars since 9:30am ET today (regular session).
+    """
+    try:
+        now_et = now_utc.astimezone(ET)
+        session_start_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        # If we're somehow before 9:30 ET (rare with market-open checks), just bail.
+        if now_et < session_start_et:
+            return None, None, None, None
+
+        start_utc = session_start_et.astimezone(timezone.utc)
+        end_utc = now_utc
+
+        def _fetch():
+            return api.get_bars(
+                symbol,
+                TimeFrame.Minute,
+                start=start_utc.isoformat(),
+                end=end_utc.isoformat(),
+                limit=2000,
+                adjustment="raw",
+                feed=ALPACA_DATA_FEED,
+            )
+
+        bars = alpaca_call_with_retry(_fetch, label="get_bars_session_1m")
+        bars_list = list(bars) if bars else []
+        if not bars_list:
+            return None, None, None, None
+
+        session_high = None
+        session_low = None
+
+        pv_sum = 0.0
+        vol_sum = 0.0
+
+        for b in bars_list:
+            try:
+                h = float(getattr(b, "h", None))
+                l = float(getattr(b, "l", None))
+                c = float(getattr(b, "c", None))
+                v = float(getattr(b, "v", 0.0) or 0.0)
+            except Exception:
+                continue
+
+            if session_high is None or h > session_high:
+                session_high = h
+            if session_low is None or l < session_low:
+                session_low = l
+
+            # VWAP approximation using close * volume
+            if v > 0:
+                pv_sum += c * v
+                vol_sum += v
+
+        vwap = (pv_sum / vol_sum) if vol_sum > 0 else None
+        return session_high, session_low, vwap, None
+    except Exception as e:
+        logger.warning(f"SESSION_STATS_FAILED: {e}")
+        return None, None, None, None
+
+
+def maybe_print_session_snapshot(
+    *,
+    state: dict,
+    now_ts: float,
+    now_utc: datetime,
+    symbol: str,
+    pos_qty: float,
+    current_price: Optional[float],
+    unrealized_pl: Optional[float],
+    unrealized_plpc: Optional[float],
+    is_leader: bool,
+):
+    if not SESSION_SNAPSHOT_BANNER:
+        return
+
+    every = float(SESSION_SNAPSHOT_EVERY_SEC)
+    if every <= 0:
+        return
+
+    last_ts = float(state.get("last_session_snapshot_ts", 0.0))
+    if (now_ts - last_ts) < every:
+        return
+
+    # Update throttle timestamp first (prevents spam on errors/restarts)
+    state["last_session_snapshot_ts"] = now_ts
+
+    session_high, session_low, vwap, _ = compute_session_stats_1m(symbol, now_utc)
+
+    vwap_dist_pct = None
+    if (vwap is not None) and (current_price is not None) and float(vwap) != 0.0:
+        vwap_dist_pct = (float(current_price) - float(vwap)) / float(vwap) * 100.0
+
+    print_session_snapshot_line(
+        symbol=symbol,
+        session_high=session_high,
+        session_low=session_low,
+        vwap_dist_pct=vwap_dist_pct,
+        unrealized_pl=unrealized_pl,
+        unrealized_plpc=unrealized_plpc,
+        pos_qty=pos_qty,
+        is_leader=is_leader,
+    )
 
 
 def maybe_print_profit_tracker_banner(
@@ -502,6 +647,9 @@ LIVE_TRADING_CONFIRM = env_str("LIVE_TRADING_CONFIRM", "")
 KILL_SWITCH = env_bool("KILL_SWITCH", False)
 
 PROFIT_TRACKER_EVERY_SEC = env_float("PROFIT_TRACKER_EVERY_SEC", 300.0)  # 5 minutes
+SESSION_SNAPSHOT_BANNER = env_bool("SESSION_SNAPSHOT_BANNER", True)
+SESSION_SNAPSHOT_EVERY_SEC = env_float("SESSION_SNAPSHOT_EVERY_SEC", 300.0)  # 5 minutes
+
 DAILY_SUMMARY_BANNER = env_bool("DAILY_SUMMARY_BANNER", True)
 DAILY_SUMMARY_ET_TIME = env_str("DAILY_SUMMARY_ET_TIME", "15:59")  # 3:59pm ET
 
@@ -515,15 +663,17 @@ TRADE_START_ET = env_str("TRADE_START_ET", "")
 TRADE_END_ET = env_str("TRADE_END_ET", "")
 
 STATE_PATH = resolve_state_path()
-
 ALPACA_KEY_ID = env_str("ALPACA_KEY_ID") or env_str("APCA_API_KEY_ID")
 ALPACA_SECRET_KEY = env_str("ALPACA_SECRET_KEY") or env_str("APCA_API_SECRET_KEY")
 ALPACA_BASE_URL = env_str("ALPACA_BASE_URL") or env_str("APCA_API_BASE_URL") or "https://paper-api.alpaca.markets"
 
 SYMBOL = env_str("ENGINE_SYMBOL", "TSLA").upper()
-
 ALPACA_DATA_FEED = env_str("ALPACA_DATA_FEED", "iex").lower()
 logger.info(f"CONFIG alpaca_data_feed={ALPACA_DATA_FEED}")
+
+PROFIT_TRACKER_EVERY_SEC = env_float("PROFIT_TRACKER_EVERY_SEC", 300.0)  # 5 minutes
+DAILY_SUMMARY_BANNER = env_bool("DAILY_SUMMARY_BANNER", True)
+DAILY_SUMMARY_ET_TIME = env_str("DAILY_SUMMARY_ET_TIME", "15:59")  # 3:59pm ET
 
 # =========================
 # Self-test / Heartbeat mode (after-hours safe)
@@ -1083,6 +1233,7 @@ def main():
 
     state.setdefault("last_profit_banner_ts", 0.0)
     state.setdefault("last_daily_summary_date_et", None)
+    state.setdefault("last_session_snapshot_ts", 0.0)
 
     if DRY_RUN and RESET_SIM_OWNED_ON_START:
         old_sim = int(state.get("sim_owned_qty", 0))
@@ -1327,12 +1478,27 @@ def main():
                 sell_target=sell_target,
                 is_leader=is_leader,
             )
-
+            
             maybe_print_heartbeat(
                 pos_qty=pos_qty,
                 avg_entry=avg_entry,
                 sell_target=sell_target,
                 is_leader=is_leader,
+            )
+            
+            maybe_print_session_snapshot(
+                state=state,
+                now_ts=time.time(),
+                symbol=SYMBOL,
+                pos_qty=pos_qty,
+                avg_entry=avg_entry,
+                current_price=current_price,
+                unrealized_pl=unrealized_pl,
+                unrealized_plpc=unrealized_plpc,
+                market_value=market_value,
+                session_high=state.get("session_high"),
+                session_low=state.get("session_low"),
+                vwap=state.get("vwap"),
             )
 
             logger.info(
@@ -1549,6 +1715,7 @@ def main():
                 "buys_today_et": int(state.get("buys_today_et", 0)),
                 "symbol": SYMBOL,
                 "last_profit_banner_ts": float(state.get("last_profit_banner_ts", 0.0)),
+                "last_session_snapshot_ts": float(state.get("last_session_snapshot_ts", 0.0)),
                 "last_daily_summary_date_et": state.get("last_daily_summary_date_et"),
                 "first_buy_banner_shown": bool(state.get("first_buy_banner_shown", False)),
                 "sell_banner_shown": bool(state.get("sell_banner_shown", False)),
