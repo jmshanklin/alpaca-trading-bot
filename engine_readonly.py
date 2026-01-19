@@ -916,6 +916,53 @@ def main():
         f"strategy_owned_qty={int(state.get('strategy_owned_qty', 0))} sim_owned_qty={int(state.get('sim_owned_qty', 0))} "
         f"buys_today_date_et={state.get('buys_today_date_et')} buys_today_et={int(state.get('buys_today_et', 0))}"
     )
+    
+    # ------------------------------------------------------------
+    # BOOT-TIME RECONCILE (DB state -> Alpaca reality)
+    # If Alpaca is flat, wipe any persisted "group/counter" memory
+    # so the bot starts clean even after-hours.
+    # ------------------------------------------------------------
+    boot_pos_qty = get_position_qty(SYMBOL)
+
+    if int(boot_pos_qty) == 0:
+        logger.warning(
+            "BOOT_RECONCILE: Alpaca position is 0 -> clearing persisted state counters + group memory"
+        )
+
+        # clear group memory
+        reset_group_state(state)
+        group_anchor_close = None
+        last_red_buy_close = None
+        group_buy_count = 0
+
+        # clear counters (so logs match Alpaca reality)
+        state["buy_count_total"] = 0
+        state["buys_today_et"] = 0
+        state["buys_today_date_et"] = et_date_str(datetime.now(timezone.utc))
+
+        # clear owned qty trackers
+        state["strategy_owned_qty"] = 0
+        state["sim_owned_qty"] = 0
+
+        # reset banners
+        state["first_buy_banner_shown"] = False
+        state["sell_banner_shown"] = False
+        state["sell_arm_banner_shown"] = False
+
+        # persist immediately so next startup is clean too
+        payload = {
+            "last_bar_ts": state.get("last_bar_ts"),
+            "group_anchor_close": None,
+            "last_red_buy_close": None,
+            "buy_count_total": 0,
+            "group_buy_count": 0,
+            "strategy_owned_qty": 0,
+            "sim_owned_qty": 0,
+            "buys_today_date_et": state["buys_today_date_et"],
+            "buys_today_et": 0,
+            "symbol": SYMBOL,
+        }
+        maybe_persist_state(state, payload, db_conn=db_conn, state_id=state_id)
 
     # Position-change baseline
     last_pos_qty = None
