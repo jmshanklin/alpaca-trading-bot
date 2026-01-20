@@ -143,15 +143,20 @@ def print_session_snapshot_line(
     else:
         vwap_str = "—"
 
-    if unrealized_pl is not None:
-        pl_str = f"${unrealized_pl:,.2f}"
-    else:
+        # If we're flat, do NOT display P/L (avoids confusing negative values with QTY=0)
+    if int(pos_qty) <= 0:
         pl_str = "—"
-
-    if unrealized_plpc is not None:
-        plpc_str = f"{unrealized_plpc * 100.0:+.2f}%"
-    else:
         plpc_str = "—"
+    else:
+        if unrealized_pl is not None:
+            pl_str = f"${unrealized_pl:,.2f}"
+        else:
+            pl_str = "—"
+
+        if unrealized_plpc is not None:
+            plpc_str = f"{unrealized_plpc * 100.0:+.2f}%"
+        else:
+            plpc_str = "—"
 
     logger.warning(
         f"📌 SNAPSHOT {symbol} | "
@@ -1489,16 +1494,13 @@ def main():
             maybe_print_session_snapshot(
                 state=state,
                 now_ts=time.time(),
+                now_utc=now_utc,
                 symbol=SYMBOL,
                 pos_qty=pos_qty,
-                avg_entry=avg_entry,
                 current_price=current_price,
                 unrealized_pl=unrealized_pl,
                 unrealized_plpc=unrealized_plpc,
-                market_value=market_value,
-                session_high=state.get("session_high"),
-                session_low=state.get("session_low"),
-                vwap=state.get("vwap"),
+                is_leader=is_leader,
             )
 
             logger.info(
