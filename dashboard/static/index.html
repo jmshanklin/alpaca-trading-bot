@@ -4,21 +4,27 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Alpaca Dashboard</title>
+
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+
     <style>
       body { margin: 0; font-family: Arial, sans-serif; }
       #topbar { padding: 10px 12px; border-bottom: 1px solid #ddd; }
-      #status { font-family: monospace; }
-      #chart { height: calc(100vh - 48px); }
+      #status { font-family: monospace; margin-left: 12px; }
+      #chart { height: 400px; }
+      #bar { padding: 10px 12px; margin: 0; }
     </style>
   </head>
+
   <body>
     <div id="topbar">
       <strong>Alpaca Dashboard</strong>
       <span id="status">loading…</span>
     </div>
+
     <div id="chart"></div>
-    <pre id="bar">Loading latest bar…</pre>
+    <pre id="bar"></pre>
+
     <script src="/static/app.js"></script>
   </body>
 </html>
-
