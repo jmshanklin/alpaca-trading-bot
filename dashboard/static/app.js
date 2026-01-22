@@ -1,29 +1,25 @@
-(async function () {
-  const statusEl = document.getElementById("status");
+async function fetchLatestBar() {
+  const el = document.getElementById("bar");
 
-  // 1) Prove JS is running
-  statusEl.textContent = "JS loaded…";
-
-  // 2) Prove we can call the backend
   try {
-    const res = await fetch("/health", { cache: "no-store" });
-    const data = await res.json();
-    statusEl.textContent = data.ok ? "Backend: OK ✅" : "Backend: NOT OK ⚠️";
-  } catch (err) {
-    statusEl.textContent = "Backend: ERROR ❌";
-    console.error(err);
+    const r = await fetch("/latest_bar", { cache: "no-store" });
+    const data = await r.json();
+
+    if (!data.ok) {
+      el.textContent = `latest_bar: not ok → ${JSON.stringify(data)}`;
+      return;
+    }
+
+    el.textContent =
+      `Latest 1m bar (${data.symbol})\n` +
+      `t: ${data.t}\n` +
+      `O: ${data.o}  H: ${data.h}  L: ${data.l}  C: ${data.c}  V: ${data.v}\n` +
+      `feed: ${data.feed}`;
+  } catch (e) {
+    el.textContent = `latest_bar: error → ${e}`;
   }
+}
 
-  // 3) Fill the page so it’s obvious something rendered
-  const chart = document.getElementById("chart");
-  chart.style.padding = "12px";
-  chart.innerHTML = `
-    <div style="font-size:14px;">
-      <div><b>Next:</b> we’ll render 1-min candles here.</div>
-      <div style="margin-top:8px; font-family:monospace;">
-        Time: ${new Date().toLocaleString()}
-      </div>
-    </div>
-  `;
-})();
-
+// Poll every 1 second (fine for now)
+fetchLatestBar();
+setInterval(fetchLatestBar, 1000);
