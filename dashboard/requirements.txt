@@ -1,4 +1,5 @@
 # Dashboard requirements placeholder
 flask
+gunicorn
 uvicorn
 fastapi
