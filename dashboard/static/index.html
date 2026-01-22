@@ -1,1 +1,25 @@
-<!-- Dashboard frontend placeholder -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Alpaca Dashboard</title>
+    <style>
+      body { margin: 0; font-family: Arial, sans-serif; }
+      #topbar { padding: 10px 12px; border-bottom: 1px solid #ddd; }
+      #status { font-family: monospace; }
+      #chart { height: calc(100vh - 48px); }
+    </style>
+  </head>
+  <body>
+    <div id="topbar">
+      <strong>Alpaca Dashboard</strong>
+      <span id="status">loading…</span>
+    </div>
+
+    <div id="chart"></div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+
