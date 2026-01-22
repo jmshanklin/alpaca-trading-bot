@@ -1,12 +1,21 @@
 import os
+from datetime import datetime, timezone, timedelta
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from alpaca_trade_api.rest import REST, TimeFrame
+
+
+# =========================
+# App + Static Frontend
+# =========================
 app = FastAPI()
 
-# Serve /static files (your JS, etc.)
+# Serve /static files (JS, CSS, etc.)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -14,22 +23,39 @@ def home():
     with open("static/index.html", "r", encoding="utf-8") as f:
         return f.read()
 
+
 @app.get("/health")
 def health():
     return {"ok": True}
-    
-from datetime import datetime, timezone, timedelta
-import os
 
-from alpaca_trade_api.rest import REST, TimeFrame  # make sure this import exists
 
-def _alpaca():
-    # Accept either naming style
-    key = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
-    secret = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
-    base_url = os.getenv("ALPACA_BASE_URL") or os.getenv("APCA_API_BASE_URL") or "https://paper-api.alpaca.markets"
+# =========================
+# Alpaca Client Helper
+# =========================
+def _alpaca() -> REST:
+    """
+    Accept either env var naming style:
+      - Preferred (matches many bots): APCA_API_KEY_ID / APCA_API_SECRET_KEY / APCA_API_BASE_URL
+      - Alternate: ALPACA_KEY_ID / ALPACA_SECRET_KEY / ALPACA_BASE_URL
+    """
+    key = os.getenv("APCA_API_KEY_ID") or os.getenv("ALPACA_KEY_ID")
+    secret = os.getenv("APCA_API_SECRET_KEY") or os.getenv("ALPACA_SECRET_KEY")
+    base_url = (
+        os.getenv("APCA_API_BASE_URL")
+        or os.getenv("ALPACA_BASE_URL")
+        or "https://paper-api.alpaca.markets"
+    )
+
+    if not key or not secret:
+        # Fail fast with a clear message (shows up in logs + API response)
+        raise ValueError("Missing Alpaca credentials. Set APCA_API_KEY_ID and APCA_API_SECRET_KEY (or ALPACA_KEY_ID/ALPACA_SECRET_KEY).")
+
     return REST(key, secret, base_url)
 
+
+# =========================
+# Market Data Endpoint
+# =========================
 @app.get("/latest_bar")
 def latest_bar():
     symbol = (os.getenv("ENGINE_SYMBOL") or os.getenv("SYMBOL") or "TSLA").upper()
@@ -37,38 +63,53 @@ def latest_bar():
 
     api = _alpaca()
 
+    # Get enough lookback to survive "no bars" situations (closed market / feed gaps).
     now_utc = datetime.now(timezone.utc)
-    start = now_utc - timedelta(minutes=15)
 
-    bars = api.get_bars(
-        symbol,
-        TimeFrame.Minute,
-        start=start.isoformat(),
-        end=now_utc.isoformat(),
-        limit=15,
-        adjustment="raw",
-        feed=feed,
-    )
-
-    bars_list = list(bars) if bars else []
-    if not bars_list:
-        return {"ok": False, "symbol": symbol, "error": "no bars returned"}
-
-    # Choose the latest CLOSED bar (timestamp strictly < current minute)
-    now_floor = now_utc.replace(second=0, microsecond=0)
     chosen = None
-    for b in reversed(bars_list):
-        bt = getattr(b, "t", None)
-        if bt is None:
+    last_error = None
+
+    # Try short lookback first, then fall back to a longer window (handles after-hours/closed market)
+    for lookback, limit in ((timedelta(minutes=15), 1000), (timedelta(days=5), 1000)):
+        start = now_utc - lookback
+        try:
+            bars = api.get_bars(
+                symbol,
+                TimeFrame.Minute,
+                start=start.isoformat(),
+                end=now_utc.isoformat(),
+                limit=limit,
+                adjustment="raw",
+                feed=feed,
+            )
+            bars_list = list(bars) if bars else []
+        except Exception as e:
+            last_error = str(e)
+            bars_list = []
+
+        if not bars_list:
             continue
-        if bt.tzinfo is None:
-            bt = bt.replace(tzinfo=timezone.utc)
-        if bt < now_floor:
-            chosen = b
+
+        # Choose the latest CLOSED bar (timestamp strictly < current minute)
+        now_floor = now_utc.replace(second=0, microsecond=0)
+        for b in reversed(bars_list):
+            bt = getattr(b, "t", None)
+            if bt is None:
+                continue
+            if bt.tzinfo is None:
+                bt = bt.replace(tzinfo=timezone.utc)
+            if bt < now_floor:
+                chosen = b
+                break
+
+        if chosen is not None:
             break
 
     if chosen is None:
-        return {"ok": False, "symbol": symbol, "error": "no closed bar found yet"}
+        payload = {"ok": False, "symbol": symbol, "error": "no bars returned"}
+        if last_error:
+            payload["alpaca_error"] = last_error
+        return payload
 
     return {
         "ok": True,
@@ -81,31 +122,3 @@ def latest_bar():
         "v": float(getattr(chosen, "v", 0.0) or 0.0),
         "feed": feed,
     }
-
-from alpaca_trade_api.rest import REST, TimeFrame
-import os
-
-ALPACA_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET = os.getenv("ALPACA_API_SECRET")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
-
-alpaca = REST(ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE_URL)
-
-@app.get("/latest_bar")
-def latest_bar():
-    bars = alpaca.get_bars(
-        "TSLA",
-        TimeFrame.Minute,
-        limit=1
-    )
-
-    bar = bars[0]
-    return {
-        "t": bar.t.isoformat(),
-        "o": bar.o,
-        "h": bar.h,
-        "l": bar.l,
-        "c": bar.c,
-        "v": bar.v
-    }
-
