@@ -1,1 +1,4 @@
 # Dashboard requirements placeholder
+flask
+uvicorn
+fastapi
