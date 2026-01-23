@@ -225,3 +225,30 @@ def position():
             "unrealized_pl": 0.0,
             "unrealized_plpc": 0.0
         }
+        
+from alpaca_trade_api.rest import APIError
+
+def _get_feed():
+    return (os.getenv("ALPACA_DATA_FEED") or "iex").lower()
+
+def _bars_with_fallback(api, symbol, tf, start, end, limit, feed):
+    try:
+        return api.get_bars(
+            symbol, tf,
+            start=start, end=end,
+            limit=limit,
+            adjustment="raw",
+            feed=feed
+        )
+    except APIError as e:
+        msg = str(e).lower()
+        # If SIP is not allowed, retry with IEX automatically
+        if "sip" in feed and ("subscription" in msg or "not permitted" in msg or "does not permit" in msg):
+            return api.get_bars(
+                symbol, tf,
+                start=start, end=end,
+                limit=limit,
+                adjustment="raw",
+                feed="iex"
+            )
+        raise
