@@ -7,31 +7,27 @@
 
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 
-  <style>
-    html, body { height: 100%; margin: 0; }
-    body { font-family: Arial, sans-serif; }
-  
-    #topbar {
-      height: 48px;
-      display: flex;
-      align-items: center;
-      padding: 0 12px;
-      border-bottom: 1px solid #ddd;
-      box-sizing: border-box;
-    }
-  
-    #status { font-family: monospace; margin-left: 12px; }
-  
-    /* ✅ Fill everything below the topbar */
-    #chart {
-      height: calc(100vh - 48px);
-      width: 100vw;
-    }
-  
-    /* optional: hide the <pre> if you still have it */
-    #bar { display: none; }
-  </style>
-  
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body { font-family: Arial, sans-serif; }
+
+      #topbar {
+        height: 48px;
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        border-bottom: 1px solid #ddd;
+        box-sizing: border-box;
+      }
+
+      #status { font-family: monospace; margin-left: 12px; }
+
+      /* Fill the screen below the topbar */
+      #chart {
+        height: calc(100vh - 48px);
+        width: 100vw;
+      }
+    </style>
   </head>
 
   <body>
@@ -41,7 +37,6 @@
     </div>
 
     <div id="chart"></div>
-    <pre id="bar"></pre>
 
     <script src="/static/app.js"></script>
   </body>
