@@ -7,13 +7,31 @@
 
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 
-    <style>
-      body { margin: 0; font-family: Arial, sans-serif; height: 100vh; overflow: hidden; }
-      #topbar { padding: 10px 12px; border-bottom: 1px solid #ddd; height: 48px; box-sizing: border-box; }
-      #status { font-family: monospace; margin-left: 12px; }
-      #chart { height: calc(100vh - 48px); }
-      #bar { display: none; } /* optional */
-    </style>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { font-family: Arial, sans-serif; }
+  
+    #topbar {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      border-bottom: 1px solid #ddd;
+      box-sizing: border-box;
+    }
+  
+    #status { font-family: monospace; margin-left: 12px; }
+  
+    /* ✅ Fill everything below the topbar */
+    #chart {
+      height: calc(100vh - 48px);
+      width: 100vw;
+    }
+  
+    /* optional: hide the <pre> if you still have it */
+    #bar { display: none; }
+  </style>
+  
   </head>
 
   <body>
