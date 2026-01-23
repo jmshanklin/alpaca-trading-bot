@@ -30,23 +30,41 @@ const avgEntryLine = candles.createPriceLine({
 
 // Load initial history
 async function loadHistory() {
-  statusEl.textContent = "loading…";
+  try {
+    statusEl.textContent = "loading…";
 
-  const r = await fetch("/bars?limit=300", { cache: "no-store" });
-  const data = await r.json();
+    const r = await fetch("/bars?limit=300", { cache: "no-store" });
 
-  if (!data.ok) {
-    statusEl.textContent = `no data (${data.error || "unknown"})`;
-    return;
+    if (!r.ok) {
+      const txt = await r.text();
+      statusEl.textContent = `bars HTTP ${r.status}: ${txt.slice(0, 120)}`;
+      return;
+    }
+
+    const data = await r.json();
+
+    if (!data.ok) {
+      statusEl.textContent = `no data (${data.error || "unknown"})`;
+      return;
+    }
+
+    if (!data.bars || data.bars.length === 0) {
+      statusEl.textContent = "no bars returned";
+      candles.setData([]);
+      return;
+    }
+
+    candles.setData(data.bars);
+    chart.timeScale().fitContent();
+
+    const last = data.bars[data.bars.length - 1];
+    statusEl.textContent = `${data.symbol} ${data.feed} | last bar: ${new Date(
+      last.time * 1000
+    ).toLocaleTimeString()}`;
+  } catch (e) {
+    statusEl.textContent = `loadHistory error: ${e}`;
+    console.error(e);
   }
-
-  candles.setData(data.bars);
-  chart.timeScale().fitContent();
-
-  const last = data.bars[data.bars.length - 1];
-  statusEl.textContent = `${data.symbol} ${data.feed} | last bar: ${new Date(
-    last.time * 1000
-  ).toLocaleTimeString()}`;
 }
 
 async function fetchPosition() {
