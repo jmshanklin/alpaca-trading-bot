@@ -52,64 +52,95 @@ def _alpaca() -> REST:
 
     return REST(key, secret, base_url)
 
+# =========================
+# Market Data Endpoints
+# =========================
+from datetime import datetime, timezone, timedelta
+from alpaca_trade_api.rest import REST, TimeFrame
+import os
 
-# =========================
-# Market Data Endpoint
-# =========================
+def _alpaca():
+    key = os.getenv("ALPACA_KEY_ID") or os.getenv("APCA_API_KEY_ID")
+    secret = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
+    base_url = os.getenv("ALPACA_BASE_URL") or os.getenv("APCA_API_BASE_URL") or "https://paper-api.alpaca.markets"
+    return REST(key, secret, base_url)
+
+def _get_minute_bars(symbol: str, feed: str, limit: int, now_utc: datetime):
+    """
+    Return up to `limit` 1-min bars ending near now_utc (UTC), sorted oldest->newest.
+    Tries a short lookback first; falls back to longer (helps after-hours / gaps).
+    If feed is invalid for your account (e.g., sip), we retry with iex automatically.
+    """
+    api = _alpaca()
+    last_error = None
+
+    # Buffer prevents "no bars" when we ask too tight a window
+    lookbacks = [
+        timedelta(minutes=max(limit + 30, 120)),  # enough for 300 bars etc.
+        timedelta(days=5),
+    ]
+
+    def try_fetch(use_feed: str):
+        nonlocal last_error
+        for lb in lookbacks:
+            start = now_utc - lb
+            try:
+                bars = api.get_bars(
+                    symbol,
+                    TimeFrame.Minute,
+                    start=start.isoformat(),
+                    end=now_utc.isoformat(),
+                    limit=min(max(limit, 1), 10000),
+                    adjustment="raw",
+                    feed=use_feed,
+                )
+                bars_list = list(bars) if bars else []
+                if bars_list:
+                    # Ensure oldest -> newest
+                    bars_list.sort(key=lambda b: getattr(b, "t"))
+                    # Keep only last `limit`
+                    return bars_list[-limit:]
+            except Exception as e:
+                last_error = str(e)
+
+        return []
+
+    bars_list = try_fetch(feed)
+
+    # If user set ALPACA_DATA_FEED=sip but account doesn't have it,
+    # Alpaca will error; retry with iex automatically.
+    if not bars_list and feed != "iex":
+        bars_list = try_fetch("iex")
+
+    return bars_list, last_error
+
+
 @app.get("/latest_bar")
 def latest_bar():
     symbol = (os.getenv("ENGINE_SYMBOL") or os.getenv("SYMBOL") or "TSLA").upper()
     feed = (os.getenv("ALPACA_DATA_FEED") or "iex").lower()
 
-    api = _alpaca()
-
-    # Get enough lookback to survive "no bars" situations (closed market / feed gaps).
     now_utc = datetime.now(timezone.utc)
+    bars_list, last_error = _get_minute_bars(symbol, feed, limit=50, now_utc=now_utc)
 
+    if not bars_list:
+        return {"ok": False, "symbol": symbol, "error": last_error or "no bars returned"}
+
+    # Choose latest CLOSED bar (strictly < current minute)
+    now_floor = now_utc.replace(second=0, microsecond=0)
     chosen = None
-    last_error = None
-
-    # Try short lookback first, then fall back to a longer window (handles after-hours/closed market)
-    for lookback, limit in ((timedelta(minutes=15), 1000), (timedelta(days=5), 1000)):
-        start = now_utc - lookback
-        try:
-            bars = api.get_bars(
-                symbol,
-                TimeFrame.Minute,
-                start=start.isoformat(),
-                end=now_utc.isoformat(),
-                limit=limit,
-                adjustment="raw",
-                feed=feed,
-            )
-            bars_list = list(bars) if bars else []
-        except Exception as e:
-            last_error = str(e)
-            bars_list = []
-
-        if not bars_list:
+    for b in reversed(bars_list):
+        bt = getattr(b, "t", None)
+        if bt is None:
             continue
-
-        # Choose the latest CLOSED bar (timestamp strictly < current minute)
-        now_floor = now_utc.replace(second=0, microsecond=0)
-        for b in reversed(bars_list):
-            bt = getattr(b, "t", None)
-            if bt is None:
-                continue
-            if bt.tzinfo is None:
-                bt = bt.replace(tzinfo=timezone.utc)
-            if bt < now_floor:
-                chosen = b
-                break
-
-        if chosen is not None:
+        if bt.tzinfo is None:
+            bt = bt.replace(tzinfo=timezone.utc)
+        if bt < now_floor:
+            chosen = b
             break
 
     if chosen is None:
-        payload = {"ok": False, "symbol": symbol, "error": "no bars returned"}
-        if last_error:
-            payload["alpaca_error"] = last_error
-        return payload
+        return {"ok": False, "symbol": symbol, "error": "no closed bar found yet"}
 
     return {
         "ok": True,
@@ -122,35 +153,23 @@ def latest_bar():
         "v": float(getattr(chosen, "v", 0.0) or 0.0),
         "feed": feed,
     }
-    
-from datetime import datetime, timezone, timedelta
+
 
 @app.get("/bars")
 def bars(limit: int = 300):
     symbol = (os.getenv("ENGINE_SYMBOL") or os.getenv("SYMBOL") or "TSLA").upper()
     feed = (os.getenv("ALPACA_DATA_FEED") or "iex").lower()
-    api = _alpaca()
+
+    # Clamp to something sane
+    limit = max(10, min(int(limit), 2000))
 
     now_utc = datetime.now(timezone.utc)
+    bars_list, last_error = _get_minute_bars(symbol, feed, limit=limit, now_utc=now_utc)
 
-    # Look back far enough to still get bars when the market is closed
-    # (Alpaca will just return the most recent bars within this window)
-    start = now_utc - timedelta(days=5)
-
-    bars = api.get_bars(
-        symbol,
-        TimeFrame.Minute,
-        start=start.isoformat(),
-        end=now_utc.isoformat(),
-        limit=limit,
-        adjustment="raw",
-        feed=feed,
-    )
-
-    bars_list = list(bars) if bars else []
     if not bars_list:
-        return {"ok": False, "symbol": symbol, "feed": feed, "error": "no bars returned"}
+        return {"ok": False, "symbol": symbol, "error": last_error or "no bars returned"}
 
+    # Convert to lightweight-charts format: epoch seconds UTC
     out = []
     for b in bars_list:
         bt = getattr(b, "t", None)
@@ -158,9 +177,8 @@ def bars(limit: int = 300):
             continue
         if bt.tzinfo is None:
             bt = bt.replace(tzinfo=timezone.utc)
-
         out.append({
-            "time": int(bt.timestamp()),   # lightweight-charts wants seconds
+            "time": int(bt.timestamp()),
             "open": float(b.o),
             "high": float(b.h),
             "low": float(b.l),
@@ -168,7 +186,6 @@ def bars(limit: int = 300):
         })
 
     return {"ok": True, "symbol": symbol, "feed": feed, "bars": out}
-
 
     # Convert to lightweight-charts format (seconds)
     out = []
