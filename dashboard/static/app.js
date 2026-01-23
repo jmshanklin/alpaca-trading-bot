@@ -9,10 +9,17 @@ const chart = LightweightCharts.createChart(chartEl, {
   rightPriceScale: { borderVisible: false },
 });
 
-// ✅ Most compatible series creation:
-const candles = chart.addCandlestickSeries();
+// ✅ NEW API (matches your current build)
+const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
+  upColor: "#26a69a",
+  downColor: "#ef5350",
+  borderUpColor: "#26a69a",
+  borderDownColor: "#ef5350",
+  wickUpColor: "#26a69a",
+  wickDownColor: "#ef5350",
+});
 
-// Keep chart sized to the container
+// Resize to fill container
 function resizeChart() {
   const rect = chartEl.getBoundingClientRect();
   chart.resize(Math.floor(rect.width), Math.floor(rect.height));
@@ -25,22 +32,17 @@ async function loadHistory() {
     statusEl.textContent = "loading…";
 
     const r = await fetch("/bars?limit=300", { cache: "no-store" });
-    if (!r.ok) {
-      const txt = await r.text();
-      statusEl.textContent = `bars HTTP ${r.status}: ${txt.slice(0, 120)}`;
-      return;
-    }
-
     const data = await r.json();
 
-    // IMPORTANT: ok:true doesn't guarantee bars exist
-    const bars = (data && data.bars) ? data.bars : [];
-    if (!data.ok || bars.length === 0) {
+    const bars = data?.bars || [];
+
+    if (!data?.ok || bars.length === 0) {
       statusEl.textContent = `no bars (ok=${data?.ok}) ${data?.error ? "| " + data.error : ""}`;
       candles.setData([]);
       return;
     }
 
+    // bars must be: [{time:<unix seconds>, open, high, low, close}, ...]
     candles.setData(bars);
     chart.timeScale().fitContent();
 
