@@ -1,10 +1,19 @@
-const statusEl = document.getElementById("status");
+const chartEl = document.getElementById("chart");
 
-// Create chart
-const chart = LightweightCharts.createChart(document.getElementById("chart"), {
+// Create Chart
+const chart = LightweightCharts.createChart(chartEl, {
+  width: chartEl.clientWidth,
+  height: chartEl.clientHeight,
   layout: { background: { color: "#0e1117" }, textColor: "#d1d4dc" },
   grid: { vertLines: { color: "#1f2430" }, horzLines: { color: "#1f2430" } },
   timeScale: { timeVisible: true, secondsVisible: false },
+});
+
+window.addEventListener("resize", () => {
+  chart.applyOptions({
+    width: chartEl.clientWidth,
+    height: chartEl.clientHeight,
+  });
 });
 
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries);
