@@ -123,15 +123,19 @@ def latest_bar():
         "feed": feed,
     }
     
+from datetime import datetime, timezone, timedelta
+
 @app.get("/bars")
 def bars(limit: int = 300):
     symbol = (os.getenv("ENGINE_SYMBOL") or os.getenv("SYMBOL") or "TSLA").upper()
     feed = (os.getenv("ALPACA_DATA_FEED") or "iex").lower()
-
     api = _alpaca()
 
     now_utc = datetime.now(timezone.utc)
-    start = now_utc - timedelta(minutes=limit + 10)
+
+    # Look back far enough to still get bars when the market is closed
+    # (Alpaca will just return the most recent bars within this window)
+    start = now_utc - timedelta(days=5)
 
     bars = api.get_bars(
         symbol,
@@ -145,7 +149,26 @@ def bars(limit: int = 300):
 
     bars_list = list(bars) if bars else []
     if not bars_list:
-        return {"ok": False, "symbol": symbol, "error": "no bars returned"}
+        return {"ok": False, "symbol": symbol, "feed": feed, "error": "no bars returned"}
+
+    out = []
+    for b in bars_list:
+        bt = getattr(b, "t", None)
+        if bt is None:
+            continue
+        if bt.tzinfo is None:
+            bt = bt.replace(tzinfo=timezone.utc)
+
+        out.append({
+            "time": int(bt.timestamp()),   # lightweight-charts wants seconds
+            "open": float(b.o),
+            "high": float(b.h),
+            "low": float(b.l),
+            "close": float(b.c),
+        })
+
+    return {"ok": True, "symbol": symbol, "feed": feed, "bars": out}
+
 
     # Convert to lightweight-charts format (seconds)
     out = []
