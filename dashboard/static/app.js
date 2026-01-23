@@ -1,25 +1,31 @@
-const chartEl = document.getElementById("chart");
-const barEl = document.getElementById("bar");
+const statusEl = document.getElementById("status");
 
 // Create chart
-const chart = LightweightCharts.createChart(chartEl, {
+const chart = LightweightCharts.createChart(document.getElementById("chart"), {
   layout: {
     background: { color: "#0e1117" },
-    textColor: "#d1d4dc",
+    textColor: "#d1d4dc"
   },
   grid: {
-    vertLines: { color: "#1f2933" },
-    horzLines: { color: "#1f2933" },
+    vertLines: { color: "#1f2430" },
+    horzLines: { color: "#1f2430" }
   },
   timeScale: {
     timeVisible: true,
-    secondsVisible: false,
-  },
+    secondsVisible: false
+  }
 });
 
-const candleSeries = chart.addCandlestickSeries();
+// Add candlestick series
+const candles = chart.addCandlestickSeries({
+  upColor: "#26a69a",
+  downColor: "#ef5350",
+  borderUpColor: "#26a69a",
+  borderDownColor: "#ef5350",
+  wickUpColor: "#26a69a",
+  wickDownColor: "#ef5350"
+});
 
-// Keep track of last bar time so we update instead of duplicating
 let lastBarTime = null;
 
 async function fetchLatestBar() {
@@ -28,32 +34,29 @@ async function fetchLatestBar() {
     const data = await r.json();
 
     if (!data.ok) {
-      barEl.textContent = `latest_bar: not ok → ${JSON.stringify(data)}`;
+      statusEl.textContent = "no data";
       return;
     }
 
-    const bar = {
-      time: Math.floor(new Date(data.t).getTime() / 1000),
+    statusEl.textContent = `TSLA ${data.feed} @ ${new Date(data.t).toLocaleTimeString()}`;
+
+    const barTime = Math.floor(new Date(data.t).getTime() / 1000);
+
+    // Prevent duplicate candles
+    if (barTime === lastBarTime) return;
+    lastBarTime = barTime;
+
+    candles.update({
+      time: barTime,
       open: data.o,
       high: data.h,
       low: data.l,
-      close: data.c,
-    };
+      close: data.c
+    });
 
-    if (lastBarTime === bar.time) {
-      candleSeries.update(bar);
-    } else {
-      candleSeries.update(bar);
-      lastBarTime = bar.time;
-    }
-
-    barEl.textContent =
-      `Latest 1m bar (${data.symbol})\n` +
-      `t: ${data.t}\n` +
-      `O: ${data.o}  H: ${data.h}  L: ${data.l}  C: ${data.c}  V: ${data.v}\n` +
-      `feed: ${data.feed}`;
-  } catch (e) {
-    barEl.textContent = `latest_bar: error → ${e}`;
+  } catch (err) {
+    statusEl.textContent = "connection error";
+    console.error(err);
   }
 }
 
