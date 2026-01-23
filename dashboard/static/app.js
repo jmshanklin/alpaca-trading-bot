@@ -17,13 +17,13 @@ const chart = LightweightCharts.createChart(document.getElementById("chart"), {
 });
 
 // Add candlestick series
-const candles = chart.addCandlestickSeries({
+const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   upColor: "#26a69a",
   downColor: "#ef5350",
   borderUpColor: "#26a69a",
   borderDownColor: "#ef5350",
   wickUpColor: "#26a69a",
-  wickDownColor: "#ef5350"
+  wickDownColor: "#ef5350",
 });
 
 let lastBarTime = null;
