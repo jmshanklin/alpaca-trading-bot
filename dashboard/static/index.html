@@ -9,35 +9,60 @@
 
     <style>
       html, body { height: 100%; margin: 0; }
-      body { font-family: Arial, sans-serif; }
-
+      body { font-family: Arial, sans-serif; background: #0e1117; color: #d1d4dc; overflow: hidden; }
+    
       #topbar {
         height: 48px;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border-bottom: 1px solid #1f2430;
         display: flex;
         align-items: center;
-        padding: 0 12px;
-        border-bottom: 1px solid #ddd;
-        box-sizing: border-box;
+        gap: 12px;
       }
-
-      #status { font-family: monospace; margin-left: 12px; }
-
-      /* Fill the screen below the topbar */
-      #chart {
+    
+      #chartWrap {
+        position: relative;
         height: calc(100vh - 48px);
-        width: 100vw;
+      }
+    
+      #chart {
+        position: absolute;
+        inset: 0;
+      }
+    
+      #bar {
+        position: absolute;
+        right: 12px;
+        bottom: 12px;
+        width: 360px;
+        max-height: 40%;
+        overflow: auto;
+        padding: 10px;
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        background: rgba(0,0,0,0.35);
+        border: 1px solid #1f2430;
+        border-radius: 8px;
+        backdrop-filter: blur(6px);
       }
     </style>
+
   </head>
-
+  
   <body>
-    <div id="topbar">
-      <strong>Alpaca Dashboard</strong>
-      <span id="status">loading…</span>
-    </div>
+  <div id="topbar">
+    <strong>Alpaca Dashboard</strong>
+    <span id="status">loading…</span>
+  </div>
 
+  <div id="chartWrap">
     <div id="chart"></div>
+    <pre id="bar"></pre>
+  </div>
 
-    <script src="/static/app.js"></script>
-  </body>
+  <script src="/static/app.js"></script>
+</body>
+  
 </html>
