@@ -188,3 +188,40 @@ def bars(limit: int = 300):
         })
 
     return {"ok": True, "symbol": symbol, "feed": feed, "bars": out}
+
+@app.get("/position")
+def position():
+    symbol = (os.getenv("ENGINE_SYMBOL") or os.getenv("SYMBOL") or "TSLA").upper()
+    api = _alpaca()
+
+    try:
+        pos = api.get_position(symbol)
+
+        qty = float(pos.qty)
+        avg_entry = float(pos.avg_entry_price)
+        market_price = float(pos.current_price)
+
+        unrealized_pl = float(pos.unrealized_pl)
+        unrealized_plpc = float(pos.unrealized_plpc)
+
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "qty": qty,
+            "avg_entry": avg_entry,
+            "market_price": market_price,
+            "unrealized_pl": unrealized_pl,
+            "unrealized_plpc": unrealized_plpc
+        }
+
+    except Exception:
+        # No open position
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "qty": 0,
+            "avg_entry": None,
+            "market_price": None,
+            "unrealized_pl": 0.0,
+            "unrealized_plpc": 0.0
+        }
