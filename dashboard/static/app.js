@@ -64,8 +64,6 @@ function isMarketOpenChicagoNow() {
   return mins >= open && mins < close;
 }
 
-const LATEST_BAR_POLL_MS = 15000; // 15 seconds (1-minute candles don't need 1-second polling)
-
 // ----------------------------
 // Chart
 // ----------------------------
@@ -368,6 +366,7 @@ async function fetchLatestBar() {
 // ----------------------------
 // Start
 // ----------------------------
+const LATEST_BAR_POLL_MS = 15000; // 15 seconds (1-minute candles don't need 1-second polling)
 
 loadHistory();
 fetchPosition();
