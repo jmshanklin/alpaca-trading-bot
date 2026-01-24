@@ -6,6 +6,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from alpaca_trade_api.rest import REST, TimeFrame
+import time
+from threading import Lock
+
+LATEST_BAR_CACHE_TTL = int(os.getenv("LATEST_BAR_CACHE_TTL", "8"))  # seconds
+
+_latest_bar_cache = {"ts": 0.0, "data": None}
+_latest_bar_lock = Lock()
 
 app = FastAPI()
 
@@ -62,13 +69,21 @@ def config():
 
 @app.get("/latest_bar")
 def latest_bar():
+    now = time.time()
+
+    # 1) Serve cached response if fresh
+    with _latest_bar_lock:
+        cached = _latest_bar_cache["data"]
+        if cached is not None and (now - _latest_bar_cache["ts"]) < LATEST_BAR_CACHE_TTL:
+            return cached
+
+    # 2) Otherwise fetch from Alpaca (your existing logic)
     api = _alpaca()
     symbol = _symbol()
     feed = _feed()
 
     now_utc = datetime.now(timezone.utc)
 
-    # IMPORTANT FIX:
     # Look back far enough so after-hours / weekends still return the last closed bar.
     start = now_utc - timedelta(hours=24)
 
@@ -84,7 +99,11 @@ def latest_bar():
 
     bars_list = list(bars) if bars else []
     if not bars_list:
-        return {"ok": False, "symbol": symbol, "feed": feed, "error": "no bars returned"}
+        payload = {"ok": False, "symbol": symbol, "feed": feed, "error": "no bars returned"}
+        with _latest_bar_lock:
+            _latest_bar_cache["ts"] = now
+            _latest_bar_cache["data"] = payload
+        return payload
 
     # Pick last CLOSED bar
     now_floor = now_utc.replace(second=0, microsecond=0)
@@ -99,9 +118,13 @@ def latest_bar():
             break
 
     if not chosen:
-        return {"ok": False, "symbol": symbol, "feed": feed, "error": "no closed bar found"}
+        payload = {"ok": False, "symbol": symbol, "feed": feed, "error": "no closed bar found"}
+        with _latest_bar_lock:
+            _latest_bar_cache["ts"] = now
+            _latest_bar_cache["data"] = payload
+        return payload
 
-    return {
+    payload = {
         "ok": True,
         "symbol": symbol,
         "feed": feed,
@@ -112,6 +135,13 @@ def latest_bar():
         "c": float(chosen.c),
         "v": float(chosen.v or 0),
     }
+
+    # 3) Store into cache and return
+    with _latest_bar_lock:
+        _latest_bar_cache["ts"] = now
+        _latest_bar_cache["data"] = payload
+
+    return payload
 
 # -----------------------
 # Historical Bars
