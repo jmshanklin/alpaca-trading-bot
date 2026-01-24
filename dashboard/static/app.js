@@ -166,10 +166,12 @@ readout.style.zIndex = "10";
 readout.style.padding = "6px 8px";
 readout.style.borderRadius = "6px";
 readout.style.border = "1px solid #1f2430";
-readout.style.background = "rgba(0,0,0,0.35)";
+readout.style.background = "rgba(0,0,0,0.65)";
 readout.style.backdropFilter = "blur(6px)";
 readout.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
-readout.style.fontSize = "12px";
+readout.style.fontSize = "16px";        // bigger text
+readout.style.fontWeight = "600";      // slightly bolder
+readout.style.letterSpacing = "0.5px"; // improves readability
 readout.style.pointerEvents = "none";
 readout.textContent = "—";
 chartEl.parentElement.appendChild(readout);
