@@ -1,6 +1,6 @@
 // ------------------------------------
 // Alpaca Dashboard - app.js (Complete)
-// Fix time axis + Chicago time + sane status
+// Chicago/Central time + crosshair time label + OHLC readout
 // ------------------------------------
 
 const statusEl = document.getElementById("status");
@@ -19,11 +19,21 @@ function nowEpochSec() {
   return Math.floor(Date.now() / 1000);
 }
 
+// Status display: date + time in Chicago
 function fmtChicago(tsSec) {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Chicago",
     month: "numeric",
     day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(tsSec * 1000));
+}
+
+// Crosshair display: time in Chicago (include seconds if you want)
+function fmtChicagoTime(tsSec) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(tsSec * 1000));
@@ -76,19 +86,34 @@ const chart = LightweightCharts.createChart(chartEl, {
     secondsVisible: false,
     rightOffset: 10,
     borderVisible: true,
-    ticksVisible: true, // <-- IMPORTANT: forces bottom tick labels
+    ticksVisible: true,
   },
+
+  // This controls the *bottom axis* formatting.
   localization: {
     timeFormatter: (time) => {
-      // For intraday, LightweightCharts gives epoch seconds
       const tsSec = typeof time === "number" ? time : time?.timestamp;
       const t = typeof tsSec === "number" ? tsSec : 0;
+      return fmtChicagoTime(t);
+    },
+  },
 
-      return new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Chicago",
-        hour: "numeric",
-        minute: "2-digit",
-      }).format(new Date(t * 1000));
+  // Crosshair settings: this is what makes the hover time label behave nicely
+  crosshair: {
+    mode: 1, // Normal
+    vertLine: {
+      visible: true,
+      labelVisible: true, // <-- time label on hover
+      style: 2,
+      width: 1,
+      color: "#6b7280",
+    },
+    horzLine: {
+      visible: true,
+      labelVisible: true,
+      style: 2,
+      width: 1,
+      color: "#6b7280",
     },
   },
 });
@@ -102,13 +127,8 @@ const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   wickDownColor: "#ef5350",
 });
 
-// Add a tiny bottom margin so the time scale never gets “squeezed”
-candles.applyOptions({
-  priceScaleId: "right",
-});
-
 // ----------------------------
-// Resize handling (stronger)
+// ResizeObserver (stabilizes layout + time scale)
 // ----------------------------
 
 function resizeChart() {
@@ -123,6 +143,38 @@ ro.observe(chartEl);
 
 requestAnimationFrame(resizeChart);
 setTimeout(resizeChart, 250);
+
+// ----------------------------
+// OHLC + Time readout (top-left overlay)
+// This restores the “timestamp while strafing” feel.
+// ----------------------------
+
+const readout = document.createElement("div");
+readout.style.position = "absolute";
+readout.style.left = "12px";
+readout.style.top = "60px"; // below top bar
+readout.style.zIndex = "10";
+readout.style.padding = "6px 8px";
+readout.style.borderRadius = "6px";
+readout.style.border = "1px solid #1f2430";
+readout.style.background = "rgba(0,0,0,0.35)";
+readout.style.backdropFilter = "blur(6px)";
+readout.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+readout.style.fontSize = "12px";
+readout.style.pointerEvents = "none";
+readout.textContent = "—";
+chartEl.parentElement.appendChild(readout);
+
+function setReadoutFromBar(tsSec, bar) {
+  if (!tsSec || !bar) {
+    readout.textContent = "—";
+    return;
+  }
+  readout.textContent =
+    `${fmtChicago(tsSec)} | ` +
+    `O:${bar.open.toFixed(2)} H:${bar.high.toFixed(2)} ` +
+    `L:${bar.low.toFixed(2)} C:${bar.close.toFixed(2)}`;
+}
 
 // ----------------------------
 // Avg Entry Line (only when position exists)
@@ -153,12 +205,35 @@ function removeAvgEntryLine() {
 // State + Debug
 // ----------------------------
 
-let lastBarTime = null;
+let lastBarTime = null;   // epoch sec
+let lastBarObj = null;    // {open,high,low,close}
 let lastSymbol = "—";
 let lastFeed = "—";
 let historyCount = 0;
 
 const debugState = {};
+
+// ----------------------------
+// Crosshair subscription (THIS is the key part)
+// ----------------------------
+
+chart.subscribeCrosshairMove((param) => {
+  // If mouse is off the chart, revert readout to last known bar
+  if (!param || !param.time) {
+    if (lastBarTime && lastBarObj) setReadoutFromBar(lastBarTime, lastBarObj);
+    return;
+  }
+
+  // param.time is epoch seconds for intraday data
+  const tsSec = typeof param.time === "number" ? param.time : param.time?.timestamp;
+
+  // Get candle bar at crosshair time
+  const seriesData = param.seriesData.get(candles);
+  if (!seriesData) return;
+
+  // seriesData has {open, high, low, close}
+  setReadoutFromBar(tsSec, seriesData);
+});
 
 // ----------------------------
 // Load History
@@ -171,7 +246,12 @@ async function loadHistory() {
     const r = await fetch("/bars?limit=300", { cache: "no-store" });
     const data = await r.json();
 
-    debugState.history = { ok: data.ok, symbol: data.symbol, feed: data.feed, bars: data.bars?.length || 0 };
+    debugState.history = {
+      ok: data.ok,
+      symbol: data.symbol,
+      feed: data.feed,
+      bars: data.bars?.length || 0,
+    };
     barEl.textContent = JSON.stringify(debugState, null, 2);
 
     if (!data.ok || !data.bars?.length) {
@@ -187,9 +267,10 @@ async function loadHistory() {
     chart.timeScale().fitContent();
 
     const last = data.bars[data.bars.length - 1];
-    lastBarTime = last?.time ?? lastBarTime;
+    lastBarTime = last.time;
+    lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
+    setReadoutFromBar(lastBarTime, lastBarObj);
 
-    // Force a resize after data is set (this often restores the bottom axis)
     resizeChart();
 
     setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(last.time)}`);
@@ -248,6 +329,8 @@ async function fetchLatestBar() {
     // Update series only when new closed bar arrives
     if (barTime !== lastBarTime) {
       lastBarTime = barTime;
+      lastBarObj = { open: data.o, high: data.h, low: data.l, close: data.c };
+
       candles.update({
         time: barTime,
         open: data.o,
@@ -255,15 +338,15 @@ async function fetchLatestBar() {
         low: data.l,
         close: data.c,
       });
+
+      // If user isn't hovering, keep readout on latest bar
+      setReadoutFromBar(lastBarTime, lastBarObj);
     }
 
-    // Status: only call it STALE during market hours
     const age = nowEpochSec() - barTime;
     const marketOpen = isMarketOpenChicagoNow();
 
-    let suffix = "";
-    if (marketOpen && age > 120) suffix = ` | STALE (${age}s)`;
-    if (!marketOpen) suffix = ` | Market closed`;
+    let suffix = marketOpen ? (age > 120 ? ` | STALE (${age}s)` : "") : " | Market closed";
 
     setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(barTime)}${suffix}`);
   } catch (e) {
