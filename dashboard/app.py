@@ -1,4 +1,6 @@
 import os
+import time
+from threading import Lock
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI
@@ -6,24 +8,30 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from alpaca_trade_api.rest import REST, TimeFrame
-import time
-from threading import Lock
 
+
+# =======================
+# Cache settings
+# =======================
 LATEST_BAR_CACHE_TTL = int(os.getenv("LATEST_BAR_CACHE_TTL", "8"))  # seconds
 
 _latest_bar_cache = {"ts": 0.0, "data": None}
 _latest_bar_lock = Lock()
 
+
+# =======================
+# App
+# =======================
 app = FastAPI()
 
 # Serve /static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# -----------------------
-# Helpers
-# -----------------------
 
-def _alpaca():
+# =======================
+# Helpers
+# =======================
+def _alpaca() -> REST:
     key = os.getenv("APCA_API_KEY_ID")
     secret = os.getenv("APCA_API_SECRET_KEY")
     base_url = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
@@ -33,24 +41,28 @@ def _alpaca():
 
     return REST(key, secret, base_url)
 
-def _symbol():
+
+def _symbol() -> str:
     return (os.getenv("ENGINE_SYMBOL") or "TSLA").upper()
 
-def _feed():
+
+def _feed() -> str:
     return (os.getenv("ALPACA_DATA_FEED") or "iex").lower()
 
-# -----------------------
-# Routes
-# -----------------------
 
+# =======================
+# Routes
+# =======================
 @app.get("/", response_class=HTMLResponse)
 def home():
     with open("static/index.html", "r", encoding="utf-8") as f:
         return f.read()
 
+
 @app.get("/health")
 def health():
     return {"ok": True}
+
 
 @app.get("/config")
 def config():
@@ -63,10 +75,10 @@ def config():
         "has_secret": bool(os.getenv("APCA_API_SECRET_KEY")),
     }
 
-# -----------------------
-# Latest Bar (last CLOSED bar)
-# -----------------------
 
+# =======================
+# Latest Bar (last CLOSED bar)
+# =======================
 @app.get("/latest_bar")
 def latest_bar():
     now = time.time()
@@ -75,9 +87,11 @@ def latest_bar():
     with _latest_bar_lock:
         cached = _latest_bar_cache["data"]
         if cached is not None and (now - _latest_bar_cache["ts"]) < LATEST_BAR_CACHE_TTL:
+            # mark it (copy not required here since we're just annotating)
+            cached["cached"] = True
             return cached
 
-    # 2) Otherwise fetch from Alpaca (your existing logic)
+    # 2) Otherwise fetch from Alpaca
     api = _alpaca()
     symbol = _symbol()
     feed = _feed()
@@ -99,13 +113,19 @@ def latest_bar():
 
     bars_list = list(bars) if bars else []
     if not bars_list:
-        payload = {"ok": False, "symbol": symbol, "feed": feed, "error": "no bars returned"}
+        payload = {
+            "ok": False,
+            "symbol": symbol,
+            "feed": feed,
+            "error": "no bars returned",
+            "cached": False,
+        }
         with _latest_bar_lock:
             _latest_bar_cache["ts"] = now
             _latest_bar_cache["data"] = payload
         return payload
 
-    # Pick last CLOSED bar
+    # Pick last CLOSED bar (strictly earlier than the current minute)
     now_floor = now_utc.replace(second=0, microsecond=0)
     chosen = None
 
@@ -118,7 +138,13 @@ def latest_bar():
             break
 
     if not chosen:
-        payload = {"ok": False, "symbol": symbol, "feed": feed, "error": "no closed bar found"}
+        payload = {
+            "ok": False,
+            "symbol": symbol,
+            "feed": feed,
+            "error": "no closed bar found",
+            "cached": False,
+        }
         with _latest_bar_lock:
             _latest_bar_cache["ts"] = now
             _latest_bar_cache["data"] = payload
@@ -134,6 +160,7 @@ def latest_bar():
         "l": float(chosen.l),
         "c": float(chosen.c),
         "v": float(chosen.v or 0),
+        "cached": False,
     }
 
     # 3) Store into cache and return
@@ -143,10 +170,10 @@ def latest_bar():
 
     return payload
 
-# -----------------------
-# Historical Bars
-# -----------------------
 
+# =======================
+# Historical Bars
+# =======================
 @app.get("/bars")
 def bars(limit: int = 300):
     api = _alpaca()
@@ -175,20 +202,22 @@ def bars(limit: int = 300):
         ts = b.t
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        out.append({
-            "time": int(ts.timestamp()),
-            "open": float(b.o),
-            "high": float(b.h),
-            "low": float(b.l),
-            "close": float(b.c),
-        })
+        out.append(
+            {
+                "time": int(ts.timestamp()),
+                "open": float(b.o),
+                "high": float(b.h),
+                "low": float(b.l),
+                "close": float(b.c),
+            }
+        )
 
     return {"ok": True, "symbol": symbol, "feed": feed, "bars": out}
 
-# -----------------------
-# Position Info
-# -----------------------
 
+# =======================
+# Position Info
+# =======================
 @app.get("/position")
 def position():
     api = _alpaca()
