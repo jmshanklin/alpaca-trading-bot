@@ -1,10 +1,11 @@
-// ----------------------------
-// Alpaca Dashboard - app.js
-// Complete version (Central Time)
-// ----------------------------
+// ------------------------------------
+// Alpaca Dashboard - app.js (Complete)
+// Chicago/Central time + resize fix
+// ------------------------------------
 
 const statusEl = document.getElementById("status");
 const barEl = document.getElementById("bar");
+const chartEl = document.getElementById("chart");
 
 // ----------------------------
 // Helpers
@@ -14,24 +15,24 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
-function fmtTimeChicagoFromEpochSec(tsSec) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Chicago",
-    hour: "numeric",
-    minute: "2-digit",
-    second: undefined,
-  }).format(new Date(tsSec * 1000));
-}
-
 function nowEpochSec() {
   return Math.floor(Date.now() / 1000);
 }
 
-// ----------------------------
-// Create chart
-// ----------------------------
+// For status text (date + time in Chicago)
+function fmtChicago(tsSec) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(tsSec * 1000));
+}
 
-const chartEl = document.getElementById("chart");
+// ----------------------------
+// Chart
+// ----------------------------
 
 const chart = LightweightCharts.createChart(chartEl, {
   layout: { background: { color: "#0e1117" }, textColor: "#d1d4dc" },
@@ -39,21 +40,22 @@ const chart = LightweightCharts.createChart(chartEl, {
     vertLines: { color: "#1f2430" },
     horzLines: { color: "#1f2430" },
   },
-  timeScale: {
-    timeVisible: true,
-    secondsVisible: false,
-    rightOffset: 10, // breathing room from price scale
-  },
   rightPriceScale: {
     borderColor: "#1f2430",
   },
+  timeScale: {
+    timeVisible: true,
+    secondsVisible: false,
+    rightOffset: 10, // space so last candle isn't glued to the price scale
+  },
 
-  // Force time labels to Central Time
+  // Force axis labels to Chicago time
   localization: {
     timeFormatter: (time) => {
-      // Lightweight Charts provides epoch seconds for business-day/time scale
+      // Lightweight Charts passes epoch seconds for intraday bars
       const tsSec = typeof time === "number" ? time : time?.timestamp;
       const t = typeof tsSec === "number" ? tsSec : 0;
+
       return new Intl.DateTimeFormat("en-US", {
         timeZone: "America/Chicago",
         hour: "numeric",
@@ -63,7 +65,7 @@ const chart = LightweightCharts.createChart(chartEl, {
   },
 });
 
-// Candles series
+// Candlestick series
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   upColor: "#26a69a",
   downColor: "#ef5350",
@@ -74,7 +76,8 @@ const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
 });
 
 // ----------------------------
-// Resize handling (fixes missing bottom time axis)
+// IMPORTANT: ResizeObserver
+// Fixes "no time scale at bottom" issues
 // ----------------------------
 
 function resizeChart() {
@@ -84,11 +87,15 @@ function resizeChart() {
   });
 }
 
-window.addEventListener("resize", resizeChart);
-setTimeout(resizeChart, 0);
+const ro = new ResizeObserver(() => resizeChart());
+ro.observe(chartEl);
+
+// Initial sizing after layout settles
+requestAnimationFrame(() => resizeChart());
+setTimeout(() => resizeChart(), 250);
 
 // ----------------------------
-// Avg Entry Line (only if position exists)
+// Avg Entry Price Line (only if position exists)
 // ----------------------------
 
 let avgEntryLine = null;
@@ -118,10 +125,13 @@ function removeAvgEntryLine() {
 // State
 // ----------------------------
 
-let lastBarTime = null; // epoch seconds of last closed bar we displayed
+let lastBarTime = null;        // epoch sec of last closed bar applied to chart
 let lastSymbol = "—";
 let lastFeed = "—";
-let lastHistoryCount = 0;
+let historyCount = 0;
+
+// Debug panel content as an object (so we don't JSON.parse arbitrary text)
+const debugState = {};
 
 // ----------------------------
 // Load History
@@ -134,14 +144,17 @@ async function loadHistory() {
     const r = await fetch("/bars?limit=300", { cache: "no-store" });
     const data = await r.json();
 
-    if (!data.ok) {
-      setStatus("no data");
+    debugState.history_meta = { ok: data.ok, symbol: data.symbol, feed: data.feed, bars: data.bars?.length };
+    barEl.textContent = JSON.stringify(debugState, null, 2);
+
+    if (!data.ok || !data.bars || data.bars.length === 0) {
+      setStatus("no history");
       return;
     }
 
     lastSymbol = data.symbol;
     lastFeed = data.feed;
-    lastHistoryCount = data.bars?.length || 0;
+    historyCount = data.bars.length;
 
     candles.setData(data.bars);
     chart.timeScale().fitContent();
@@ -149,11 +162,7 @@ async function loadHistory() {
     const last = data.bars[data.bars.length - 1];
     lastBarTime = last?.time ?? lastBarTime;
 
-    setStatus(
-      `${lastSymbol} ${lastFeed} | bars: ${lastHistoryCount} | last: ${fmtTimeChicagoFromEpochSec(
-        last.time
-      )}`
-    );
+    setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(last.time)}`);
   } catch (e) {
     console.error("loadHistory error:", e);
     setStatus("history error");
@@ -161,7 +170,7 @@ async function loadHistory() {
 }
 
 // ----------------------------
-// Position Line
+// Position
 // ----------------------------
 
 async function fetchPosition() {
@@ -169,11 +178,8 @@ async function fetchPosition() {
     const r = await fetch("/position", { cache: "no-store" });
     const p = await r.json();
 
-    // Put position JSON into debug panel (append-friendly)
-    // We'll show both bar + position in the panel.
-    const existing = barEl.textContent ? JSON.parse(barEl.textContent) : {};
-    const merged = { ...existing, position: p };
-    barEl.textContent = JSON.stringify(merged, null, 2);
+    debugState.position = p;
+    barEl.textContent = JSON.stringify(debugState, null, 2);
 
     if (!p.ok || !p.qty || p.qty <= 0) {
       removeAvgEntryLine();
@@ -186,19 +192,21 @@ async function fetchPosition() {
       title: `Avg Entry (${p.qty})`,
     });
   } catch (e) {
-    // Don't remove line on transient errors
     console.error("fetchPosition error:", e);
   }
 }
 
 // ----------------------------
-// Live Bar Updates (poll latest closed bar)
+// Latest closed bar (polling)
 // ----------------------------
 
 async function fetchLatestBar() {
   try {
     const r = await fetch("/latest_bar", { cache: "no-store" });
     const data = await r.json();
+
+    debugState.latest_bar = data;
+    barEl.textContent = JSON.stringify(debugState, null, 2);
 
     if (!data.ok) return;
 
@@ -207,42 +215,24 @@ async function fetchLatestBar() {
 
     const barTime = Math.floor(new Date(data.t).getTime() / 1000);
 
-    // Debug panel: latest bar
-    const existing = barEl.textContent ? JSON.parse(barEl.textContent) : {};
-    const merged = { ...existing, latest_bar: data };
-    barEl.textContent = JSON.stringify(merged, null, 2);
-
-    // Only update when a new closed bar arrives
-    if (barTime === lastBarTime) {
-      // Still update status with staleness
-      const age = nowEpochSec() - barTime;
-      const staleTag = age > 120 ? ` | STALE (${age}s)` : "";
-      setStatus(
-        `${lastSymbol} ${lastFeed} | bars: ${lastHistoryCount} | last: ${fmtTimeChicagoFromEpochSec(
-          barTime
-        )}${staleTag}`
-      );
-      return;
-    }
-
-    lastBarTime = barTime;
-
-    candles.update({
-      time: barTime,
-      open: data.o,
-      high: data.h,
-      low: data.l,
-      close: data.c,
-    });
-
+    // Always update status (even if bar hasn't changed)
     const age = nowEpochSec() - barTime;
     const staleTag = age > 120 ? ` | STALE (${age}s)` : "";
 
-    setStatus(
-      `${lastSymbol} ${lastFeed} | bars: ${lastHistoryCount} | last: ${fmtTimeChicagoFromEpochSec(
-        barTime
-      )}${staleTag}`
-    );
+    // If it's a new closed bar, update the series
+    if (barTime !== lastBarTime) {
+      lastBarTime = barTime;
+
+      candles.update({
+        time: barTime,
+        open: data.o,
+        high: data.h,
+        low: data.l,
+        close: data.c,
+      });
+    }
+
+    setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(barTime)}${staleTag}`);
   } catch (e) {
     console.error("fetchLatestBar error:", e);
   }
@@ -256,9 +246,9 @@ loadHistory();
 fetchPosition();
 fetchLatestBar();
 
-// Polling intervals (safe defaults)
+// Polling intervals
 setInterval(fetchLatestBar, 1000);
 setInterval(fetchPosition, 2000);
 
-// History refresh less often (heavy call)
+// History refresh (heavy) - keep it slower
 setInterval(loadHistory, 60000);
