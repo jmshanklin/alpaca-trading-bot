@@ -81,6 +81,8 @@ const chart = LightweightCharts.createChart(chartEl, {
   rightPriceScale: {
     borderColor: "#1f2430",
   },
+
+  // ✅ This is the key: make sure the time scale is drawn and has room
   timeScale: {
     timeVisible: true,
     secondsVisible: false,
@@ -89,21 +91,12 @@ const chart = LightweightCharts.createChart(chartEl, {
     ticksVisible: true,
   },
 
-  // This controls the *bottom axis* formatting.
-  localization: {
-    timeFormatter: (time) => {
-      const tsSec = typeof time === "number" ? time : time?.timestamp;
-      const t = typeof tsSec === "number" ? tsSec : 0;
-      return fmtChicagoTime(t);
-    },
-  },
-
-  // Crosshair settings: this is what makes the hover time label behave nicely
+  // ✅ This is the key: bottom label on crosshair must be enabled
   crosshair: {
-    mode: 1, // Normal
+    mode: 1,
     vertLine: {
       visible: true,
-      labelVisible: true, // <-- time label on hover
+      labelVisible: true,  // <-- this is the bottom time label
       style: 2,
       width: 1,
       color: "#6b7280",
@@ -116,7 +109,23 @@ const chart = LightweightCharts.createChart(chartEl, {
       color: "#6b7280",
     },
   },
+
+  // ✅ Chicago formatting, but do it via "localization" (works for axis labels)
+  localization: {
+    timeFormatter: (time) => {
+      const tsSec = typeof time === "number" ? time : time?.timestamp;
+      const t = typeof tsSec === "number" ? tsSec : 0;
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Chicago",
+        month: "numeric",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(new Date(t * 1000));
+    },
+  },
 });
+
 
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   upColor: "#26a69a",
@@ -171,11 +180,9 @@ function setReadoutFromBar(tsSec, bar) {
     return;
   }
   readout.textContent =
-    `${fmtChicago(tsSec)} | ` +
-    `O:${bar.open.toFixed(2)} H:${bar.high.toFixed(2)} ` +
-    `L:${bar.low.toFixed(2)} C:${bar.close.toFixed(2)}`;
+  `O:${bar.open.toFixed(2)} H:${bar.high.toFixed(2)} ` +
+  `L:${bar.low.toFixed(2)} C:${bar.close.toFixed(2)}`;
 }
-
 // ----------------------------
 // Avg Entry Line (only when position exists)
 // ----------------------------
