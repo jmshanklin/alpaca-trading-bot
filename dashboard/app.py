@@ -181,14 +181,19 @@ def bars(limit: int = 300):
     feed = _feed()
 
     now_utc = datetime.now(timezone.utc)
-    start = now_utc - timedelta(days=2)
-
+    # Look back far enough so after-hours / weekends still return the last closed bar.
+    start = now_utc - timedelta(days=7)
+    
+    # Force RFC3339 timestamps with trailing 'Z' (helps Alpaca parse consistently)
+    start_rfc3339 = start.isoformat().replace("+00:00", "Z")
+    end_rfc3339 = now_utc.isoformat().replace("+00:00", "Z")
+    
     bars = api.get_bars(
         symbol,
         TimeFrame.Minute,
-        start=start.isoformat(),
-        end=now_utc.isoformat(),
-        limit=limit,
+        start=start_rfc3339,
+        end=end_rfc3339,
+        limit=1000,
         adjustment="raw",
         feed=feed,
     )
