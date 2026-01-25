@@ -2,13 +2,11 @@ import os
 import time
 from threading import Lock
 from datetime import datetime, timezone, timedelta
-
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-
 from alpaca_trade_api.rest import REST, TimeFrame
-
+from alpaca_trade_api.rest import APIError
 
 # =======================
 # Cache settings
@@ -17,13 +15,11 @@ LATEST_BAR_CACHE_TTL = int(os.getenv("LATEST_BAR_CACHE_TTL", "8"))  # seconds
 _latest_bar_cache = {"ts": 0.0, "data": None}
 _latest_bar_lock = Lock()
 
-
 # =======================
 # App
 # =======================
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
 
 # =======================
 # Helpers
@@ -38,19 +34,15 @@ def _alpaca() -> REST:
 
     return REST(key, secret, base_url)
 
-
 def _symbol() -> str:
     return (os.getenv("ENGINE_SYMBOL") or "TSLA").upper()
-
 
 def _feed() -> str:
     return (os.getenv("ALPACA_DATA_FEED") or "iex").lower()
 
-
 def _to_rfc3339_z(dt: datetime) -> str:
     """Convert aware UTC datetime to RFC3339 with trailing Z."""
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
 
 # =======================
 # Routes
@@ -59,7 +51,6 @@ def _to_rfc3339_z(dt: datetime) -> str:
 def home():
     with open("static/index.html", "r", encoding="utf-8") as f:
         return f.read()
-
 
 @app.get("/health")
 def health():
@@ -84,7 +75,6 @@ def config():
         "has_key": bool(os.getenv("APCA_API_KEY_ID")),
         "has_secret": bool(os.getenv("APCA_API_SECRET_KEY")),
     }
-
 
 # =======================
 # Latest Bar (last CLOSED bar)
@@ -208,7 +198,6 @@ def latest_bar():
 
     return payload
 
-
 # =======================
 # Historical Bars
 # =======================
@@ -255,7 +244,6 @@ def bars(limit: int = 300):
 
     return {"ok": True, "symbol": symbol, "feed": feed, "bars": out}
 
-
 # =======================
 # Position Info
 # =======================
@@ -278,3 +266,44 @@ def position():
         "unrealized_pl": float(pos.unrealized_pl),
         "unrealized_plpc": float(pos.unrealized_plpc),
     }
+@app.get("/fills")
+def fills(limit: int = 200):
+    api = _alpaca()
+    symbol = _symbol()
+
+    try:
+        orders = api.list_orders(
+            status="closed",
+            limit=limit,
+            nested=True,
+            direction="desc"
+        )
+    except APIError as e:
+        return {"ok": False, "symbol": symbol, "error": str(e)}
+
+    out = []
+    for o in orders:
+        if (getattr(o, "symbol", "") or "").upper() != symbol:
+            continue
+        if getattr(o, "filled_at", None) is None:
+            continue
+
+        filled_qty = float(getattr(o, "filled_qty", 0) or 0)
+        if filled_qty <= 0:
+            continue
+
+        filled_avg_price = float(getattr(o, "filled_avg_price", 0) or 0)
+
+        fa = getattr(o, "filled_at", None)
+        filled_at = fa if isinstance(fa, str) else fa.isoformat()
+
+        out.append({
+            "id": getattr(o, "id", None),
+            "symbol": symbol,
+            "side": (getattr(o, "side", "") or "").lower(),   # "buy" / "sell"
+            "filled_at": filled_at,
+            "filled_qty": filled_qty,
+            "filled_avg_price": filled_avg_price,
+        })
+
+    return {"ok": True, "symbol": symbol, "fills": out}
