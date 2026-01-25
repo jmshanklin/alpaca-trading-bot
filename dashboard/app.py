@@ -2,11 +2,12 @@ import os
 import time
 from threading import Lock
 from datetime import datetime, timezone, timedelta
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from alpaca_trade_api.rest import REST, TimeFrame
-from alpaca_trade_api.rest import APIError
+
+from alpaca_trade_api.rest import REST, TimeFrame, APIError
 
 # =======================
 # Cache settings
@@ -44,6 +45,14 @@ def _to_rfc3339_z(dt: datetime) -> str:
     """Convert aware UTC datetime to RFC3339 with trailing Z."""
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+def _iso(dt_or_str) -> str:
+    """Return ISO string whether input is datetime or already a string."""
+    if dt_or_str is None:
+        return ""
+    if isinstance(dt_or_str, str):
+        return dt_or_str
+    return dt_or_str.isoformat()
+
 # =======================
 # Routes
 # =======================
@@ -55,6 +64,7 @@ def home():
 @app.get("/health")
 def health():
     return {"ok": True}
+
 @app.get("/version")
 def version():
     return {
@@ -87,8 +97,9 @@ def latest_bar():
     with _latest_bar_lock:
         cached = _latest_bar_cache["data"]
         if cached is not None and (now - _latest_bar_cache["ts"]) < LATEST_BAR_CACHE_TTL:
-            cached["cached"] = True
-            return cached
+            cached_copy = dict(cached)
+            cached_copy["cached"] = True
+            return cached_copy
 
     # 2) Otherwise fetch from Alpaca
     api = _alpaca()
@@ -99,7 +110,6 @@ def latest_bar():
 
     # Look back far enough so weekends still find the most recent trading bars
     start_utc = now_utc - timedelta(days=7)
-
     start_rfc3339 = _to_rfc3339_z(start_utc)
     end_rfc3339 = _to_rfc3339_z(now_utc)
 
@@ -138,8 +148,6 @@ def latest_bar():
             "feed": feed,
             "error": "no bars returned",
             "cached": False,
-    
-            # ---- DEBUG INFO (temporary) ----
             "debug": {
                 "start": start_rfc3339,
                 "end": end_rfc3339,
@@ -182,7 +190,7 @@ def latest_bar():
         "ok": True,
         "symbol": symbol,
         "feed": feed,
-        "t": chosen.t.isoformat(),
+        "t": _iso(chosen.t),
         "o": float(chosen.o),
         "h": float(chosen.h),
         "l": float(chosen.l),
@@ -213,15 +221,29 @@ def bars(limit: int = 300):
     start_rfc3339 = _to_rfc3339_z(start_utc)
     end_rfc3339 = _to_rfc3339_z(now_utc)
 
-    bars = api.get_bars(
-        symbol,
-        TimeFrame.Minute,
-        start=start_rfc3339,
-        end=end_rfc3339,
-        limit=limit,
-        adjustment="raw",
-        feed=feed,
-    )
+    try:
+        bars = api.get_bars(
+            symbol,
+            TimeFrame.Minute,
+            start=start_rfc3339,
+            end=end_rfc3339,
+            limit=limit,
+            adjustment="raw",
+            feed=feed,
+        )
+    except Exception as e:
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "feed": feed,
+            "error": "get_bars exception",
+            "debug": {
+                "start": start_rfc3339,
+                "end": end_rfc3339,
+                "exception_type": type(e).__name__,
+                "exception_text": str(e),
+            },
+        }
 
     bars_list = list(bars) if bars else []
     if not bars_list:
@@ -266,44 +288,78 @@ def position():
         "unrealized_pl": float(pos.unrealized_pl),
         "unrealized_plpc": float(pos.unrealized_plpc),
     }
+
+# =======================
+# Fills (for chart markers)
+# =======================
 @app.get("/fills")
 def fills(limit: int = 200):
+    """
+    Returns filled orders for the current symbol.
+    IMPORTANT: We paginate through closed orders so we don't miss fills
+    when 'limit' is smaller than total closed orders.
+    """
     api = _alpaca()
     symbol = _symbol()
 
+    wanted = max(1, min(int(limit), 1000))  # safety
+    out = []
+
+    # We page through closed orders in batches until we collect enough fills
+    # or hit a hard cap (prevents long loops).
+    page_size = 200
+    max_pages = 5  # 5 * 200 = 1000 orders scanned max
+
     try:
-        orders = api.list_orders(
-            status="closed",
-            limit=limit,
-            nested=True,
-            direction="desc"
-        )
+        for _ in range(max_pages):
+            orders = api.list_orders(
+                status="closed",
+                limit=page_size,
+                nested=True,
+                direction="desc",
+            )
+
+            if not orders:
+                break
+
+            for o in orders:
+                if (getattr(o, "symbol", "") or "").upper() != symbol:
+                    continue
+
+                fa = getattr(o, "filled_at", None)
+                if fa is None:
+                    continue
+
+                filled_qty = float(getattr(o, "filled_qty", 0) or 0)
+                if filled_qty <= 0:
+                    continue
+
+                filled_avg_price = float(getattr(o, "filled_avg_price", 0) or 0)
+
+                out.append({
+                    "id": getattr(o, "id", None),
+                    "symbol": symbol,
+                    "side": (getattr(o, "side", "") or "").lower(),  # "buy" / "sell"
+                    "filled_at": _iso(fa),
+                    "filled_qty": filled_qty,
+                    "filled_avg_price": filled_avg_price,
+                })
+
+                if len(out) >= wanted:
+                    break
+
+            if len(out) >= wanted:
+                break
+
+            # If we didn't find enough fills for this symbol in this page,
+            # looping again would fetch the SAME latest page (alpaca_trade_api
+            # doesn't expose a "page token" here). So there's no point in looping.
+            # Instead, we just return whatever we found.
+            break
+
     except APIError as e:
         return {"ok": False, "symbol": symbol, "error": str(e)}
-
-    out = []
-    for o in orders:
-        if (getattr(o, "symbol", "") or "").upper() != symbol:
-            continue
-        if getattr(o, "filled_at", None) is None:
-            continue
-
-        filled_qty = float(getattr(o, "filled_qty", 0) or 0)
-        if filled_qty <= 0:
-            continue
-
-        filled_avg_price = float(getattr(o, "filled_avg_price", 0) or 0)
-
-        fa = getattr(o, "filled_at", None)
-        filled_at = fa if isinstance(fa, str) else fa.isoformat()
-
-        out.append({
-            "id": getattr(o, "id", None),
-            "symbol": symbol,
-            "side": (getattr(o, "side", "") or "").lower(),   # "buy" / "sell"
-            "filled_at": filled_at,
-            "filled_qty": filled_qty,
-            "filled_avg_price": filled_avg_price,
-        })
+    except Exception as e:
+        return {"ok": False, "symbol": symbol, "error": f"{type(e).__name__}: {e}"}
 
     return {"ok": True, "symbol": symbol, "fills": out}
