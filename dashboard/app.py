@@ -64,7 +64,15 @@ def home():
 @app.get("/health")
 def health():
     return {"ok": True}
-
+@app.get("/version")
+def version():
+    return {
+        "ok": True,
+        "marker": "STEP3_DEBUG_v1",
+        "ttl": LATEST_BAR_CACHE_TTL,
+        "symbol": _symbol(),
+        "feed": _feed(),
+    }
 
 @app.get("/config")
 def config():
