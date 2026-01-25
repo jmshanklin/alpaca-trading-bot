@@ -105,15 +105,32 @@ def latest_bar():
     start_rfc3339 = _to_rfc3339_z(start_utc)
     end_rfc3339 = _to_rfc3339_z(now_utc)
 
-    bars = api.get_bars(
-        symbol,
-        TimeFrame.Minute,
-        start=start_rfc3339,
-        end=end_rfc3339,
-        limit=1000,
-        adjustment="raw",
-        feed=feed,
-    )
+    try:
+        bars = api.get_bars(
+            symbol,
+            TimeFrame.Minute,
+            start=start_rfc3339,
+            end=end_rfc3339,
+            limit=1000,
+            adjustment="raw",
+            feed=feed,
+        )
+    except Exception as e:
+        payload = {
+            "ok": False,
+            "symbol": symbol,
+            "feed": feed,
+            "error": "get_bars exception",
+            "cached": False,
+            "debug": {
+                "start": start_rfc3339,
+                "end": end_rfc3339,
+                "base_url": os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets"),
+                "exception_type": type(e).__name__,
+                "exception_text": str(e),
+            },
+        }
+        return payload
 
     bars_list = list(bars) if bars else []
     if not bars_list:
@@ -123,6 +140,15 @@ def latest_bar():
             "feed": feed,
             "error": "no bars returned",
             "cached": False,
+    
+            # ---- DEBUG INFO (temporary) ----
+            "debug": {
+                "start": start_rfc3339,
+                "end": end_rfc3339,
+                "base_url": os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets"),
+                "data_feed_env": os.getenv("ALPACA_DATA_FEED"),
+                "ttl": LATEST_BAR_CACHE_TTL,
+            },
         }
         with _latest_bar_lock:
             _latest_bar_cache["ts"] = now
