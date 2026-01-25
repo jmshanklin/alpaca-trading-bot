@@ -14,7 +14,6 @@ from alpaca_trade_api.rest import REST, TimeFrame
 # Cache settings
 # =======================
 LATEST_BAR_CACHE_TTL = int(os.getenv("LATEST_BAR_CACHE_TTL", "8"))  # seconds
-
 _latest_bar_cache = {"ts": 0.0, "data": None}
 _latest_bar_lock = Lock()
 
@@ -23,8 +22,6 @@ _latest_bar_lock = Lock()
 # App
 # =======================
 app = FastAPI()
-
-# Serve /static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
@@ -48,6 +45,11 @@ def _symbol() -> str:
 
 def _feed() -> str:
     return (os.getenv("ALPACA_DATA_FEED") or "iex").lower()
+
+
+def _to_rfc3339_z(dt: datetime) -> str:
+    """Convert aware UTC datetime to RFC3339 with trailing Z."""
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # =======================
@@ -87,7 +89,6 @@ def latest_bar():
     with _latest_bar_lock:
         cached = _latest_bar_cache["data"]
         if cached is not None and (now - _latest_bar_cache["ts"]) < LATEST_BAR_CACHE_TTL:
-            # mark it (copy not required here since we're just annotating)
             cached["cached"] = True
             return cached
 
@@ -98,14 +99,17 @@ def latest_bar():
 
     now_utc = datetime.now(timezone.utc)
 
-    # Look back far enough so after-hours / weekends still return the last closed bar.
-    start = now_utc - timedelta(days=7)
+    # Look back far enough so weekends still find the most recent trading bars
+    start_utc = now_utc - timedelta(days=7)
+
+    start_rfc3339 = _to_rfc3339_z(start_utc)
+    end_rfc3339 = _to_rfc3339_z(now_utc)
 
     bars = api.get_bars(
         symbol,
         TimeFrame.Minute,
-        start=start.isoformat(),
-        end=now_utc.isoformat(),
+        start=start_rfc3339,
+        end=end_rfc3339,
         limit=1000,
         adjustment="raw",
         feed=feed,
@@ -181,19 +185,17 @@ def bars(limit: int = 300):
     feed = _feed()
 
     now_utc = datetime.now(timezone.utc)
-    # Look back far enough so after-hours / weekends still return the last closed bar.
-    start = now_utc - timedelta(days=7)
-    
-    # Force RFC3339 timestamps with trailing 'Z' (helps Alpaca parse consistently)
-    start_rfc3339 = start.isoformat().replace("+00:00", "Z")
-    end_rfc3339 = now_utc.isoformat().replace("+00:00", "Z")
-    
+    start_utc = now_utc - timedelta(days=2)
+
+    start_rfc3339 = _to_rfc3339_z(start_utc)
+    end_rfc3339 = _to_rfc3339_z(now_utc)
+
     bars = api.get_bars(
         symbol,
         TimeFrame.Minute,
         start=start_rfc3339,
         end=end_rfc3339,
-        limit=1000,
+        limit=limit,
         adjustment="raw",
         feed=feed,
     )
