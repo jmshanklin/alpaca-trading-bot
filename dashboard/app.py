@@ -99,7 +99,7 @@ def latest_bar():
     now_utc = datetime.now(timezone.utc)
 
     # Look back far enough so after-hours / weekends still return the last closed bar.
-    start = now_utc - timedelta(hours=24)
+    start = now_utc - timedelta(days=7)
 
     bars = api.get_bars(
         symbol,
