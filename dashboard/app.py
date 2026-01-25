@@ -101,7 +101,7 @@ def latest_bar():
             cached_copy["cached"] = True
             return cached_copy
 
-    # 2) Otherwise fetch from Alpaca
+    # 2) Otherwise fetch from Alpaca Trading Platform
     api = _alpaca()
     symbol = _symbol()
     feed = _feed()
