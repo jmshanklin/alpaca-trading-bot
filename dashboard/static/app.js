@@ -145,7 +145,7 @@ const sellTargetLine = candles.createPriceLine({
 });
 
 // ----------------------------
-// ResizeObserver (stabilizes layout + time scale)
+// Resize Observer (stabilizes layout + time scale)
 // ----------------------------
 
 function resizeChart() {
@@ -269,8 +269,91 @@ async function loadHistory() {
 }
 
 // ----------------------------
-// Position (updates the 2 lines)
+// Position
 // ----------------------------
+// ----------------------------
+// Fills -> BUY/SELL markers
+// ----------------------------
+
+let lastMarkersKey = "";   // prevents pointless redraws
+
+function toBarTimeSecFromIso(isoString) {
+  // Convert ISO to epoch seconds, then snap to the minute (matches your 1-min bars)
+  const ms = Date.parse(isoString);
+  if (!Number.isFinite(ms)) return null;
+  const sec = Math.floor(ms / 1000);
+  return Math.floor(sec / 60) * 60;
+}
+
+function buildMarkersFromFills(fills) {
+  // Only show markers that fall inside the currently loaded history window
+  // (avoids a bunch of invisible markers and keeps things fast)
+  const data = candles.data?.() || null; // some builds expose data(); if not, we’ll fallback below
+
+  // Fallback: we’ll just not filter if the library build doesn't support data()
+  let minT = null, maxT = null;
+  if (Array.isArray(data) && data.length) {
+    minT = data[0].time;
+    maxT = data[data.length - 1].time;
+  }
+
+  const markers = [];
+
+  for (const f of fills) {
+    const t = toBarTimeSecFromIso(f.filled_at);
+    if (!t) continue;
+
+    // Optional filtering to current window if we can
+    if (minT != null && maxT != null) {
+      if (t < minT || t > maxT) continue;
+    }
+
+    const side = (f.side || "").toLowerCase();
+    const qty = Number(f.filled_qty || 0);
+    const px = Number(f.filled_avg_price || 0);
+
+    if (side === "buy") {
+      markers.push({
+        time: t,
+        position: "belowBar",
+        color: "#22c55e",
+        shape: "arrowUp",
+        text: `B ${qty}@${px.toFixed(2)}`,
+      });
+    } else if (side === "sell") {
+      markers.push({
+        time: t,
+        position: "aboveBar",
+        color: "#ef4444",
+        shape: "arrowDown",
+        text: `S ${qty}@${px.toFixed(2)}`,
+      });
+    }
+  }
+
+  // Sort by time (LightweightCharts expects ordered markers)
+  markers.sort((a, b) => a.time - b.time);
+  return markers;
+}
+
+async function fetchMarkers() {
+  try {
+    const r = await fetch("/fills?limit=500", { cache: "no-store" });
+    const data = await r.json();
+    if (!data.ok || !Array.isArray(data.fills)) return;
+
+    const markers = buildMarkersFromFills(data.fills);
+
+    // Prevent redrawing markers if nothing changed
+    const key = JSON.stringify(markers.map(m => [m.time, m.text]));
+    if (key === lastMarkersKey) return;
+    lastMarkersKey = key;
+
+    candles.setMarkers(markers);
+  } catch (e) {
+    console.error("fetchMarkers failed", e);
+  }
+}
 
 async function fetchPosition() {
   try {
@@ -350,7 +433,9 @@ const LATEST_BAR_POLL_MS = 15000;
 loadHistory();
 fetchPosition();
 fetchLatestBar();
+fetchMarkers();
 
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
 setInterval(fetchPosition, 2000);
+setInterval(fetchMarkers, 5000);
 setInterval(loadHistory, 60000);
