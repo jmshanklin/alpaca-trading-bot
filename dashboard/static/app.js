@@ -1,6 +1,7 @@
 // ------------------------------------
 // Alpaca Dashboard - app.js (Complete)
 // Chicago/Central time + crosshair time label + OHLC readout
+// + Avg Entry line (gold) + Sell Target line (blue)
 // ------------------------------------
 
 const statusEl = document.getElementById("status");
@@ -30,15 +31,6 @@ function fmtChicago(tsSec) {
   }).format(new Date(tsSec * 1000));
 }
 
-// Crosshair display: time in Chicago (include seconds if you want)
-function fmtChicagoTime(tsSec) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Chicago",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(tsSec * 1000));
-}
-
 // Market hours (Chicago): 8:30–15:00 CT, Mon–Fri
 function isMarketOpenChicagoNow() {
   const now = new Date();
@@ -50,16 +42,16 @@ function isMarketOpenChicagoNow() {
     hour12: false,
   }).formatToParts(now);
 
-  const wk = parts.find(p => p.type === "weekday")?.value || "";
-  const hour = parseInt(parts.find(p => p.type === "hour")?.value || "0", 10);
-  const minute = parseInt(parts.find(p => p.type === "minute")?.value || "0", 10);
+  const wk = parts.find((p) => p.type === "weekday")?.value || "";
+  const hour = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
+  const minute = parseInt(parts.find((p) => p.type === "minute")?.value || "0", 10);
 
-  const isWeekday = ["Mon","Tue","Wed","Thu","Fri"].includes(wk);
+  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(wk);
   if (!isWeekday) return false;
 
   const mins = hour * 60 + minute;
-  const open = 8 * 60 + 30;   // 08:30
-  const close = 15 * 60 + 0;  // 15:00
+  const open = 8 * 60 + 30; // 08:30
+  const close = 15 * 60 + 0; // 15:00
 
   return mins >= open && mins < close;
 }
@@ -82,7 +74,6 @@ const chart = LightweightCharts.createChart(chartEl, {
     borderColor: "#1f2430",
   },
 
-  // ✅ This is the key: make sure the time scale is drawn and has room
   timeScale: {
     timeVisible: true,
     secondsVisible: false,
@@ -91,12 +82,11 @@ const chart = LightweightCharts.createChart(chartEl, {
     ticksVisible: true,
   },
 
-  // ✅ This is the key: bottom label on crosshair must be enabled
   crosshair: {
     mode: 1,
     vertLine: {
       visible: true,
-      labelVisible: true,  // <-- this is the bottom time label
+      labelVisible: true,
       style: 2,
       width: 1,
       color: "#6b7280",
@@ -110,7 +100,6 @@ const chart = LightweightCharts.createChart(chartEl, {
     },
   },
 
-  // ✅ Chicago formatting, but do it via "localization" (works for axis labels)
   localization: {
     timeFormatter: (time) => {
       const tsSec = typeof time === "number" ? time : time?.timestamp;
@@ -126,32 +115,33 @@ const chart = LightweightCharts.createChart(chartEl, {
   },
 });
 
-
+// ✅ Candles series (NO extra code inside the options object!)
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
-  const avgEntryLine = candles.createPriceLine({
-  price: 0,
-  color: "#f5c542",   // gold
-  lineWidth: 2,
-  lineStyle: 2,
-  axisLabelVisible: true,
-  title: "Avg Entry"
-});
-
-const sellTargetLine = candles.createPriceLine({
-  price: 0,
-  color: "#4aa3ff",   // blue
-  lineWidth: 2,
-  lineStyle: 2,
-  axisLabelVisible: true,
-  title: "Sell Target"
-});
-
   upColor: "#26a69a",
   downColor: "#ef5350",
   borderUpColor: "#26a69a",
   borderDownColor: "#ef5350",
   wickUpColor: "#26a69a",
   wickDownColor: "#ef5350",
+});
+
+// ✅ Price lines (define ONCE, right after candles exists)
+const avgEntryLine = candles.createPriceLine({
+  price: 0,
+  color: "#f5c542", // gold
+  lineWidth: 2,
+  lineStyle: 2,
+  axisLabelVisible: true,
+  title: "Avg Entry",
+});
+
+const sellTargetLine = candles.createPriceLine({
+  price: 0,
+  color: "#4aa3ff", // blue
+  lineWidth: 2,
+  lineStyle: 2,
+  axisLabelVisible: true,
+  title: "Sell Target",
 });
 
 // ----------------------------
@@ -172,24 +162,24 @@ requestAnimationFrame(resizeChart);
 setTimeout(resizeChart, 250);
 
 // ----------------------------
-// OHLC + Time readout (top-left overlay)
-// This restores the “timestamp while strafing” feel.
+// OHLC readout (top-left overlay)
 // ----------------------------
 
 const readout = document.createElement("div");
 readout.style.position = "absolute";
 readout.style.left = "12px";
-readout.style.top = "60px"; // below top bar
+readout.style.top = "60px";
 readout.style.zIndex = "10";
 readout.style.padding = "6px 8px";
 readout.style.borderRadius = "6px";
 readout.style.border = "1px solid #1f2430";
 readout.style.background = "rgba(0,0,0,0.65)";
 readout.style.backdropFilter = "blur(6px)";
-readout.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
-readout.style.fontSize = "16px";        // bigger text
-readout.style.fontWeight = "600";      // slightly bolder
-readout.style.letterSpacing = "0.5px"; // improves readability
+readout.style.fontFamily =
+  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+readout.style.fontSize = "16px";
+readout.style.fontWeight = "600";
+readout.style.letterSpacing = "0.5px";
 readout.style.pointerEvents = "none";
 readout.textContent = "—";
 chartEl.parentElement.appendChild(readout);
@@ -200,50 +190,16 @@ function setReadoutFromBar(tsSec, bar) {
     return;
   }
   readout.textContent =
-  `O:${bar.open.toFixed(2)} H:${bar.high.toFixed(2)} ` +
-  `L:${bar.low.toFixed(2)} C:${bar.close.toFixed(2)}`;
+    `O:${bar.open.toFixed(2)} H:${bar.high.toFixed(2)} ` +
+    `L:${bar.low.toFixed(2)} C:${bar.close.toFixed(2)}`;
 }
-// ----------------------------
-// Avg Entry Line (only when position exists)
-// ----------------------------
-
-let avgEntryLine = null;
-
-function ensureAvgEntryLine() {
-  if (avgEntryLine) return avgEntryLine;
-  avgEntryLine = candles.createPriceLine({
-    price: 0,
-    color: "#f5c542",
-    lineWidth: 2,
-    lineStyle: 2,
-    axisLabelVisible: true,
-    title: "Avg Entry",
-  });
-  return avgEntryLine;
-}
-
-function removeAvgEntryLine() {
-  if (!avgEntryLine) return;
-  candles.removePriceLine(avgEntryLine);
-  avgEntryLine = null;
-}
-
-// Sell target line (Avg Entry * (1 + SELL_PCT))
-const sellTargetLine = candles.createPriceLine({
-  price: 0,
-  color: "#4da3ff",
-  lineWidth: 2,
-  lineStyle: 2,
-  axisLabelVisible: true,
-  title: "Sell Target"
-});
 
 // ----------------------------
 // State + Debug
 // ----------------------------
 
-let lastBarTime = null;   // epoch sec
-let lastBarObj = null;    // {open,high,low,close}
+let lastBarTime = null; // epoch sec
+let lastBarObj = null; // {open,high,low,close}
 let lastSymbol = "—";
 let lastFeed = "—";
 let historyCount = 0;
@@ -251,24 +207,19 @@ let historyCount = 0;
 const debugState = {};
 
 // ----------------------------
-// Crosshair subscription (THIS is the key part)
+// Crosshair subscription
 // ----------------------------
 
 chart.subscribeCrosshairMove((param) => {
-  // If mouse is off the chart, revert readout to last known bar
   if (!param || !param.time) {
     if (lastBarTime && lastBarObj) setReadoutFromBar(lastBarTime, lastBarObj);
     return;
   }
 
-  // param.time is epoch seconds for intraday data
   const tsSec = typeof param.time === "number" ? param.time : param.time?.timestamp;
-
-  // Get candle bar at crosshair time
   const seriesData = param.seriesData.get(candles);
   if (!seriesData) return;
 
-  // seriesData has {open, high, low, close}
   setReadoutFromBar(tsSec, seriesData);
 });
 
@@ -318,7 +269,7 @@ async function loadHistory() {
 }
 
 // ----------------------------
-// Position
+// Position (updates the 2 lines)
 // ----------------------------
 
 async function fetchPosition() {
@@ -326,7 +277,6 @@ async function fetchPosition() {
     const r = await fetch("/position", { cache: "no-store" });
     const p = await r.json();
 
-    // No position? Hide lines by setting price=0
     if (!p.ok || !p.qty || p.qty <= 0) {
       avgEntryLine.applyOptions({ price: 0, title: "Avg Entry" });
       sellTargetLine.applyOptions({ price: 0, title: "Sell Target" });
@@ -335,12 +285,12 @@ async function fetchPosition() {
 
     avgEntryLine.applyOptions({
       price: p.avg_entry,
-      title: `Avg Entry (${p.qty})`
+      title: `Avg Entry (${p.qty})`,
     });
 
     sellTargetLine.applyOptions({
       price: p.sell_target,
-      title: `Sell Target (+${(p.sell_pct * 100).toFixed(3)}%)`
+      title: `Sell Target (+${(p.sell_pct * 100).toFixed(3)}%)`,
     });
   } catch (e) {
     console.error("fetchPosition failed", e);
@@ -366,7 +316,6 @@ async function fetchLatestBar() {
 
     const barTime = Math.floor(new Date(data.t).getTime() / 1000);
 
-    // Update series only when new closed bar arrives
     if (barTime !== lastBarTime) {
       lastBarTime = barTime;
       lastBarObj = { open: data.o, high: data.h, low: data.l, close: data.c };
@@ -379,15 +328,13 @@ async function fetchLatestBar() {
         close: data.c,
       });
 
-      // If user isn't hovering, keep readout on latest bar
       setReadoutFromBar(lastBarTime, lastBarObj);
     }
 
     const age = nowEpochSec() - barTime;
     const marketOpen = isMarketOpenChicagoNow();
 
-    let suffix = marketOpen ? (age > 120 ? ` | STALE (${age}s)` : "") : " | Market closed";
-
+    const suffix = marketOpen ? (age > 120 ? ` | STALE (${age}s)` : "") : " | Market closed";
     setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(barTime)}${suffix}`);
   } catch (e) {
     console.error("fetchLatestBar error:", e);
@@ -397,7 +344,8 @@ async function fetchLatestBar() {
 // ----------------------------
 // Start
 // ----------------------------
-const LATEST_BAR_POLL_MS = 15000; // 15 seconds (1-minute candles don't need 1-second polling)
+
+const LATEST_BAR_POLL_MS = 15000;
 
 loadHistory();
 fetchPosition();
