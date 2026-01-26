@@ -8,7 +8,6 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from alpaca_trade_api.rest import REST, TimeFrame, APIError
-print("DASHBOARD VERSION: 2026-01-25-TEST")
 
 # =======================
 # Cache settings
@@ -102,7 +101,7 @@ def latest_bar():
             cached_copy["cached"] = True
             return cached_copy
 
-    # 2) Otherwise fetch from Alpaca Trading Platform
+    # 2) Otherwise fetch from Alpaca
     api = _alpaca()
     symbol = _symbol()
     feed = _feed()
