@@ -95,6 +95,7 @@ def config():
         "base_url": os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets"),
         "has_key": bool(os.getenv("APCA_API_KEY_ID")),
         "has_secret": bool(os.getenv("APCA_API_SECRET_KEY")),
+        "sell_pct": float(os.getenv("SELL_PCT", "0.002")),
     }
 
 # ============================================================
@@ -334,17 +335,27 @@ def bars(limit: int = 300):
 def position():
     api = _alpaca()
     symbol = _symbol()
+    sell_pct = float(os.getenv("SELL_PCT", "0.002"))
 
     try:
         pos = api.get_position(symbol)
     except Exception:
-        return {"ok": True, "symbol": symbol, "qty": 0}
+        return {"ok": True, "symbol": symbol, "qty": 0, "sell_pct": sell_pct}
+
+    qty = float(pos.qty)
+    avg_entry = float(pos.avg_entry_price)
+
+    sell_target = 0.0
+    if qty and qty > 0:
+        sell_target = avg_entry * (1.0 + sell_pct)
 
     return {
         "ok": True,
         "symbol": symbol,
-        "qty": float(pos.qty),
-        "avg_entry": float(pos.avg_entry_price),
+        "qty": qty,
+        "avg_entry": avg_entry,
+        "sell_pct": sell_pct,
+        "sell_target": sell_target,
         "market_price": float(pos.current_price),
         "unrealized_pl": float(pos.unrealized_pl),
         "unrealized_plpc": float(pos.unrealized_plpc),
