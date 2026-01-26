@@ -120,6 +120,16 @@ const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   wickDownColor: "#ef5350",
 });
 
+// ✅ Markers support (v4 uses series.setMarkers, v5 uses createSeriesMarkers)
+const markersLayer = (typeof candles.setMarkers === "function")
+  ? { set: (ms) => candles.setMarkers(ms) }
+  : (typeof LightweightCharts.createSeriesMarkers === "function")
+    ? (() => {
+        const p = LightweightCharts.createSeriesMarkers(candles, []);
+        return { set: (ms) => p.setMarkers(ms) };
+      })()
+    : null;
+
 // ✅ Price lines (define ONCE, right after candles exists)
 const avgEntryLine = candles.createPriceLine({
   price: 0,
@@ -184,7 +194,9 @@ async function loadMarkers() {
     if (h === lastMarkersHash) return;
     lastMarkersHash = h;
 
-    candles.setMarkers(markers);
+    if (!markersLayer) return; // no marker support
+    markersLayer.set(markers);
+
   } catch (e) {
     console.error("loadMarkers failed", e);
   }
