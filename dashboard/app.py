@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from alpaca_trade_api.rest import REST, TimeFrame, APIError
+print("DASHBOARD VERSION: 2026-01-25-TEST")
 
 # =======================
 # Cache settings
