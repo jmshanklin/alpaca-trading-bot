@@ -1,7 +1,8 @@
 // ------------------------------------
-// Alpaca Dashboard - app.js (Complete)
+// Alpaca Dashboard - app.js (CLEAN, UPDATED)
 // Chicago/Central time + crosshair time label + OHLC readout
 // + Avg Entry line (gold) + Sell Target line (blue)
+// + BUY/SELL markers (from /fills)
 // ------------------------------------
 
 const statusEl = document.getElementById("status");
@@ -11,7 +12,6 @@ const chartEl = document.getElementById("chart");
 // ----------------------------
 // Helpers
 // ----------------------------
-
 function setStatus(text) {
   statusEl.textContent = text;
 }
@@ -50,16 +50,14 @@ function isMarketOpenChicagoNow() {
   if (!isWeekday) return false;
 
   const mins = hour * 60 + minute;
-  const open = 8 * 60 + 30; // 08:30
+  const open = 8 * 60 + 30;  // 08:30
   const close = 15 * 60 + 0; // 15:00
-
   return mins >= open && mins < close;
 }
 
 // ----------------------------
 // Chart
 // ----------------------------
-
 const chart = LightweightCharts.createChart(chartEl, {
   layout: {
     background: { color: "#0e1117" },
@@ -73,7 +71,6 @@ const chart = LightweightCharts.createChart(chartEl, {
   rightPriceScale: {
     borderColor: "#1f2430",
   },
-
   timeScale: {
     timeVisible: true,
     secondsVisible: false,
@@ -81,12 +78,11 @@ const chart = LightweightCharts.createChart(chartEl, {
     borderVisible: true,
     ticksVisible: true,
   },
-
   crosshair: {
     mode: 1,
     vertLine: {
       visible: true,
-      labelVisible: true,
+      labelVisible: true, // bottom time label
       style: 2,
       width: 1,
       color: "#6b7280",
@@ -99,7 +95,6 @@ const chart = LightweightCharts.createChart(chartEl, {
       color: "#6b7280",
     },
   },
-
   localization: {
     timeFormatter: (time) => {
       const tsSec = typeof time === "number" ? time : time?.timestamp;
@@ -115,7 +110,7 @@ const chart = LightweightCharts.createChart(chartEl, {
   },
 });
 
-// ✅ Candles series (NO extra code inside the options object!)
+// ✅ Candles series
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   upColor: "#26a69a",
   downColor: "#ef5350",
@@ -154,8 +149,8 @@ function minuteFloor(tsSec) {
 }
 
 function hashMarkers(ms) {
-  // small stable hash so we don’t redraw constantly
-  return ms.map(m => `${m.time}|${m.position}|${m.text}`).join(";");
+  // stable enough to avoid constant redraws
+  return ms.map((m) => `${m.time}|${m.position}|${m.text}`).join(";");
 }
 
 async function loadMarkers() {
@@ -165,10 +160,9 @@ async function loadMarkers() {
     if (!data.ok || !Array.isArray(data.fills)) return;
 
     const markers = data.fills
-      .map(f => {
-        // filled_at is ISO; convert to epoch seconds
+      .map((f) => {
         const ts = Math.floor(new Date(f.filled_at).getTime() / 1000);
-        const t = minuteFloor(ts); // IMPORTANT: align to 1-min bars
+        const t = minuteFloor(ts); // align to 1-min bars
 
         const side = (f.side || "").toLowerCase();
         const isBuy = side === "buy";
@@ -184,7 +178,6 @@ async function loadMarkers() {
           text: `${isBuy ? "B" : "S"} ${qty}@${px.toFixed(2)}`,
         };
       })
-      // LightweightCharts behaves better when markers are sorted oldest->newest
       .sort((a, b) => a.time - b.time);
 
     const h = hashMarkers(markers);
@@ -200,7 +193,6 @@ async function loadMarkers() {
 // ----------------------------
 // Resize Observer (stabilizes layout + time scale)
 // ----------------------------
-
 function resizeChart() {
   chart.applyOptions({
     width: chartEl.clientWidth,
@@ -217,7 +209,6 @@ setTimeout(resizeChart, 250);
 // ----------------------------
 // OHLC readout (top-left overlay)
 // ----------------------------
-
 const readout = document.createElement("div");
 readout.style.position = "absolute";
 readout.style.left = "12px";
@@ -250,9 +241,8 @@ function setReadoutFromBar(tsSec, bar) {
 // ----------------------------
 // State + Debug
 // ----------------------------
-
 let lastBarTime = null; // epoch sec
-let lastBarObj = null; // {open,high,low,close}
+let lastBarObj = null;  // {open,high,low,close}
 let lastSymbol = "—";
 let lastFeed = "—";
 let historyCount = 0;
@@ -262,7 +252,6 @@ const debugState = {};
 // ----------------------------
 // Crosshair subscription
 // ----------------------------
-
 chart.subscribeCrosshairMove((param) => {
   if (!param || !param.time) {
     if (lastBarTime && lastBarObj) setReadoutFromBar(lastBarTime, lastBarObj);
@@ -279,7 +268,6 @@ chart.subscribeCrosshairMove((param) => {
 // ----------------------------
 // Load History
 // ----------------------------
-
 async function loadHistory() {
   setStatus("loading history…");
 
@@ -305,9 +293,9 @@ async function loadHistory() {
     historyCount = data.bars.length;
 
     candles.setData(data.bars);
-    await loadMarkers();
+    await loadMarkers(); // markers after data exists
     chart.timeScale().fitContent();
-    
+
     const last = data.bars[data.bars.length - 1];
     lastBarTime = last.time;
     lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
@@ -323,92 +311,8 @@ async function loadHistory() {
 }
 
 // ----------------------------
-// Position
+// Position (avg entry + sell target)
 // ----------------------------
-// ----------------------------
-// Fills -> BUY/SELL markers
-// ----------------------------
-
-let lastMarkersKey = "";   // prevents pointless redraws
-
-function toBarTimeSecFromIso(isoString) {
-  // Convert ISO to epoch seconds, then snap to the minute (matches your 1-min bars)
-  const ms = Date.parse(isoString);
-  if (!Number.isFinite(ms)) return null;
-  const sec = Math.floor(ms / 1000);
-  return Math.floor(sec / 60) * 60;
-}
-
-function buildMarkersFromFills(fills) {
-  // Only show markers that fall inside the currently loaded history window
-  // (avoids a bunch of invisible markers and keeps things fast)
-  const data = candles.data?.() || null; // some builds expose data(); if not, we’ll fallback below
-
-  // Fallback: we’ll just not filter if the library build doesn't support data()
-  let minT = null, maxT = null;
-  if (Array.isArray(data) && data.length) {
-    minT = data[0].time;
-    maxT = data[data.length - 1].time;
-  }
-
-  const markers = [];
-
-  for (const f of fills) {
-    const t = toBarTimeSecFromIso(f.filled_at);
-    if (!t) continue;
-
-    // Optional filtering to current window if we can
-    if (minT != null && maxT != null) {
-      if (t < minT || t > maxT) continue;
-    }
-
-    const side = (f.side || "").toLowerCase();
-    const qty = Number(f.filled_qty || 0);
-    const px = Number(f.filled_avg_price || 0);
-
-    if (side === "buy") {
-      markers.push({
-        time: t,
-        position: "belowBar",
-        color: "#22c55e",
-        shape: "arrowUp",
-        text: `B ${qty}@${px.toFixed(2)}`,
-      });
-    } else if (side === "sell") {
-      markers.push({
-        time: t,
-        position: "aboveBar",
-        color: "#ef4444",
-        shape: "arrowDown",
-        text: `S ${qty}@${px.toFixed(2)}`,
-      });
-    }
-  }
-
-  // Sort by time (LightweightCharts expects ordered markers)
-  markers.sort((a, b) => a.time - b.time);
-  return markers;
-}
-
-async function fetchMarkers() {
-  try {
-    const r = await fetch("/fills?limit=500", { cache: "no-store" });
-    const data = await r.json();
-    if (!data.ok || !Array.isArray(data.fills)) return;
-
-    const markers = buildMarkersFromFills(data.fills);
-
-    // Prevent redrawing markers if nothing changed
-    const key = JSON.stringify(markers.map(m => [m.time, m.text]));
-    if (key === lastMarkersKey) return;
-    lastMarkersKey = key;
-
-    candles.setMarkers(markers);
-  } catch (e) {
-    console.error("fetchMarkers failed", e);
-  }
-}
-
 async function fetchPosition() {
   try {
     const r = await fetch("/position", { cache: "no-store" });
@@ -437,7 +341,6 @@ async function fetchPosition() {
 // ----------------------------
 // Latest closed bar
 // ----------------------------
-
 async function fetchLatestBar() {
   try {
     const r = await fetch("/latest_bar", { cache: "no-store" });
@@ -453,6 +356,7 @@ async function fetchLatestBar() {
 
     const barTime = Math.floor(new Date(data.t).getTime() / 1000);
 
+    // Update series only when new closed bar arrives
     if (barTime !== lastBarTime) {
       lastBarTime = barTime;
       lastBarObj = { open: data.o, high: data.h, low: data.l, close: data.c };
@@ -470,8 +374,8 @@ async function fetchLatestBar() {
 
     const age = nowEpochSec() - barTime;
     const marketOpen = isMarketOpenChicagoNow();
-
     const suffix = marketOpen ? (age > 120 ? ` | STALE (${age}s)` : "") : " | Market closed";
+
     setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(barTime)}${suffix}`);
   } catch (e) {
     console.error("fetchLatestBar error:", e);
@@ -481,17 +385,14 @@ async function fetchLatestBar() {
 // ----------------------------
 // Start
 // ----------------------------
-
 const LATEST_BAR_POLL_MS = 15000;
 
 loadHistory();
 fetchPosition();
 fetchLatestBar();
-fetchMarkers();
 loadMarkers();
 
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
 setInterval(fetchPosition, 2000);
-setInterval(fetchMarkers, 5000);
 setInterval(loadHistory, 60000);
 setInterval(loadMarkers, 5000);
