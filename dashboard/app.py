@@ -240,14 +240,44 @@ def bars(limit: int = 300):
             "debug": {
                 "start": start_rfc3339,
                 "end": end_rfc3339,
+                "base_url": os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets"),
+                "data_feed_env": os.getenv("ALPACA_DATA_FEED"),
+                "limit": limit,
+                "exception_type": type(e).__name__,
+                "exception_text": str(e),
+            },
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "feed": feed,
+            "error": "get_bars exception",
+            "debug": {
+                "start": start_rfc3339,
+                "end": end_rfc3339,
                 "exception_type": type(e).__name__,
                 "exception_text": str(e),
             },
         }
 
     bars_list = list(bars) if bars else []
+    
     if not bars_list:
-        return {"ok": False, "symbol": symbol, "feed": feed, "error": "no bars returned"}
+        return {
+            "ok": False,
+            "symbol": symbol,
+            "feed": feed,
+            "error": "no bars returned",
+            "debug": {
+                "start": start_rfc3339,
+                "end": end_rfc3339,
+                "base_url": os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets"),
+                "data_feed_env": os.getenv("ALPACA_DATA_FEED"),
+                "limit": limit,
+            },
+        }
 
     out = []
     for b in bars_list:
