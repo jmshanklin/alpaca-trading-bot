@@ -210,6 +210,16 @@ function removeAvgEntryLine() {
   avgEntryLine = null;
 }
 
+// Sell target line (Avg Entry * (1 + SELL_PCT))
+const sellTargetLine = candles.createPriceLine({
+  price: 0,
+  color: "#4da3ff",
+  lineWidth: 2,
+  lineStyle: 2,
+  axisLabelVisible: true,
+  title: "Sell Target"
+});
+
 // ----------------------------
 // State + Debug
 // ----------------------------
@@ -298,22 +308,24 @@ async function fetchPosition() {
     const r = await fetch("/position", { cache: "no-store" });
     const p = await r.json();
 
-    debugState.position = p;
-    barEl.textContent = JSON.stringify(debugState, null, 2);
-
     if (!p.ok || !p.qty || p.qty <= 0) {
-      removeAvgEntryLine();
+      avgEntryLine.applyOptions({ price: 0, title: "Avg Entry (flat)" });
+      sellTargetLine.applyOptions({ price: 0, title: "Sell Target (flat)" });
       return;
     }
 
-    const line = ensureAvgEntryLine();
-    line.applyOptions({
+    avgEntryLine.applyOptions({
       price: p.avg_entry,
-      title: `Avg Entry (${p.qty})`,
+      title: `Avg Entry (${p.qty})`
     });
-  } catch (e) {
-    console.error("fetchPosition error:", e);
-  }
+
+    // Sell target = avg entry * (1 + sell_pct)
+    sellTargetLine.applyOptions({
+      price: p.sell_target,
+      title: `Sell Target (+${(p.sell_pct * 100).toFixed(2)}%)`
+    });
+
+  } catch {}
 }
 
 // ----------------------------
