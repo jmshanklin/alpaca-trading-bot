@@ -74,9 +74,11 @@ const chart = LightweightCharts.createChart(chartEl, {
   timeScale: {
     timeVisible: true,
     secondsVisible: false,
-    rightOffset: 10,
+    rightOffset: 30,
     borderVisible: true,
     ticksVisible: true,
+    fixRightEdge: true,   // keeps the last candle anchored nicely
+    lockVisibleTimeRangeOnResize: true // reduces weird jumps on resize
   },
   crosshair: {
     mode: 1,
@@ -397,14 +399,27 @@ async function fetchLatestBar() {
 // ----------------------------
 // Start
 // ----------------------------
-const LATEST_BAR_POLL_MS = 15000;
+const LATEST_BAR_POLL_MS = 5000; // poll 5s so the new candle appears quickly after the minute closes
 
-loadHistory();
+let didFitOnce = false;
+
+async function loadHistoryOnce() {
+  await loadHistory();              // your existing loadHistory()
+  if (!didFitOnce) {
+    chart.timeScale().fitContent(); // do it once only
+    didFitOnce = true;
+  }
+}
+
+loadHistoryOnce();
 fetchPosition();
 fetchLatestBar();
-loadMarkers();
+fetchMarkers();
 
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
 setInterval(fetchPosition, 2000);
-setInterval(loadHistory, 60000);
-setInterval(loadMarkers, 5000);
+setInterval(fetchMarkers, 5000);
+
+// IMPORTANT: do NOT keep reloading history every 60s
+// setInterval(loadHistory, 60000);
+
