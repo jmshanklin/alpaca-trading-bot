@@ -47,6 +47,13 @@ def _symbol() -> str:
 def _feed() -> str:
     # Keep default as IEX. (SIP will fail without entitlement.)
     return (os.getenv("ALPACA_DATA_FEED") or "iex").lower()
+    
+def _sell_pct() -> float:
+    # default 0.002 = 0.2%
+    try:
+        return float(os.getenv("SELL_PCT", "0.002"))
+    except Exception:
+        return 0.002
 
 def _to_rfc3339_z(dt: datetime) -> str:
     """Convert aware UTC datetime to RFC3339 with trailing Z."""
@@ -335,19 +342,22 @@ def bars(limit: int = 300):
 def position():
     api = _alpaca()
     symbol = _symbol()
-    sell_pct = float(os.getenv("SELL_PCT", "0.002"))
+    sell_pct = _sell_pct()
 
     try:
         pos = api.get_position(symbol)
     except Exception:
-        return {"ok": True, "symbol": symbol, "qty": 0, "sell_pct": sell_pct}
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "qty": 0,
+            "sell_pct": sell_pct,
+            "sell_target": None,
+        }
 
     qty = float(pos.qty)
     avg_entry = float(pos.avg_entry_price)
-
-    sell_target = 0.0
-    if qty and qty > 0:
-        sell_target = avg_entry * (1.0 + sell_pct)
+    sell_target = (avg_entry * (1.0 + sell_pct)) if qty > 0 else None
 
     return {
         "ok": True,
