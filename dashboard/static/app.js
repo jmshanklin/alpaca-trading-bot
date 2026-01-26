@@ -128,6 +128,24 @@ const chart = LightweightCharts.createChart(chartEl, {
 
 
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
+  const avgEntryLine = candles.createPriceLine({
+  price: 0,
+  color: "#f5c542",   // gold
+  lineWidth: 2,
+  lineStyle: 2,
+  axisLabelVisible: true,
+  title: "Avg Entry"
+});
+
+const sellTargetLine = candles.createPriceLine({
+  price: 0,
+  color: "#4aa3ff",   // blue
+  lineWidth: 2,
+  lineStyle: 2,
+  axisLabelVisible: true,
+  title: "Sell Target"
+});
+
   upColor: "#26a69a",
   downColor: "#ef5350",
   borderUpColor: "#26a69a",
@@ -308,9 +326,10 @@ async function fetchPosition() {
     const r = await fetch("/position", { cache: "no-store" });
     const p = await r.json();
 
+    // No position? Hide lines by setting price=0
     if (!p.ok || !p.qty || p.qty <= 0) {
-      avgEntryLine.applyOptions({ price: 0, title: "Avg Entry (flat)" });
-      sellTargetLine.applyOptions({ price: 0, title: "Sell Target (flat)" });
+      avgEntryLine.applyOptions({ price: 0, title: "Avg Entry" });
+      sellTargetLine.applyOptions({ price: 0, title: "Sell Target" });
       return;
     }
 
@@ -319,13 +338,13 @@ async function fetchPosition() {
       title: `Avg Entry (${p.qty})`
     });
 
-    // Sell target = avg entry * (1 + sell_pct)
     sellTargetLine.applyOptions({
       price: p.sell_target,
-      title: `Sell Target (+${(p.sell_pct * 100).toFixed(2)}%)`
+      title: `Sell Target (+${(p.sell_pct * 100).toFixed(3)}%)`
     });
-
-  } catch {}
+  } catch (e) {
+    console.error("fetchPosition failed", e);
+  }
 }
 
 // ----------------------------
