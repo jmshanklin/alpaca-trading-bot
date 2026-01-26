@@ -145,6 +145,59 @@ const sellTargetLine = candles.createPriceLine({
 });
 
 // ----------------------------
+// BUY/SELL markers (from /fills)
+// ----------------------------
+let lastMarkersHash = "";
+
+function minuteFloor(tsSec) {
+  return Math.floor(tsSec / 60) * 60;
+}
+
+function hashMarkers(ms) {
+  // small stable hash so we don’t redraw constantly
+  return ms.map(m => `${m.time}|${m.position}|${m.text}`).join(";");
+}
+
+async function loadMarkers() {
+  try {
+    const r = await fetch("/fills?limit=500", { cache: "no-store" });
+    const data = await r.json();
+    if (!data.ok || !Array.isArray(data.fills)) return;
+
+    const markers = data.fills
+      .map(f => {
+        // filled_at is ISO; convert to epoch seconds
+        const ts = Math.floor(new Date(f.filled_at).getTime() / 1000);
+        const t = minuteFloor(ts); // IMPORTANT: align to 1-min bars
+
+        const side = (f.side || "").toLowerCase();
+        const isBuy = side === "buy";
+
+        const qty = Number(f.filled_qty || 0);
+        const px = Number(f.filled_avg_price || 0);
+
+        return {
+          time: t,
+          position: isBuy ? "belowBar" : "aboveBar",
+          shape: isBuy ? "arrowUp" : "arrowDown",
+          color: isBuy ? "#22c55e" : "#ef4444",
+          text: `${isBuy ? "B" : "S"} ${qty}@${px.toFixed(2)}`,
+        };
+      })
+      // LightweightCharts behaves better when markers are sorted oldest->newest
+      .sort((a, b) => a.time - b.time);
+
+    const h = hashMarkers(markers);
+    if (h === lastMarkersHash) return;
+    lastMarkersHash = h;
+
+    candles.setMarkers(markers);
+  } catch (e) {
+    console.error("loadMarkers failed", e);
+  }
+}
+
+// ----------------------------
 // Resize Observer (stabilizes layout + time scale)
 // ----------------------------
 
@@ -252,8 +305,9 @@ async function loadHistory() {
     historyCount = data.bars.length;
 
     candles.setData(data.bars);
+    await loadMarkers();
     chart.timeScale().fitContent();
-
+    
     const last = data.bars[data.bars.length - 1];
     lastBarTime = last.time;
     lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
@@ -434,8 +488,10 @@ loadHistory();
 fetchPosition();
 fetchLatestBar();
 fetchMarkers();
+loadMarkers();
 
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
 setInterval(fetchPosition, 2000);
 setInterval(fetchMarkers, 5000);
 setInterval(loadHistory, 60000);
+setInterval(loadMarkers, 5000);
