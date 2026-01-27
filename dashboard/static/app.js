@@ -10,7 +10,7 @@ const barEl = document.getElementById("bar");
 const chartEl = document.getElementById("chart");
 
 // ----------------------------
-// Helpers
+//  Helpers
 // ----------------------------
 function setStatus(text) {
   statusEl.textContent = text;
