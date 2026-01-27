@@ -11,6 +11,15 @@ const barEl = document.getElementById("bar");
 const chartEl = document.getElementById("chart");
 
 // ----------------------------
+// Mode: LIVE vs HISTORY
+// ----------------------------
+let HISTORY_MODE = false;
+
+// Tune these:
+const LIVE_BAR_LIMIT = 300;
+const HISTORY_BAR_LIMIT = 1500; // try 1500 first; later 3000 if Render/browser can handle it
+
+// ----------------------------
 // Helpers
 // ----------------------------
 function setStatus(text) {
@@ -116,6 +125,33 @@ const chart = LightweightCharts.createChart(chartEl, {
     },
   },
 });
+
+// ----------------------------
+// UI: History Mode toggle button
+// ----------------------------
+const toggleBtn = document.createElement("button");
+toggleBtn.textContent = "History: OFF";
+toggleBtn.style.marginLeft = "12px";
+toggleBtn.style.padding = "6px 10px";
+toggleBtn.style.borderRadius = "8px";
+toggleBtn.style.border = "1px solid #1f2430";
+toggleBtn.style.background = "#0e1117";
+toggleBtn.style.color = "#d1d4dc";
+toggleBtn.style.cursor = "pointer";
+toggleBtn.title = "Toggle History Mode (loads more 1-min bars)";
+
+// Put it next to your status line
+statusEl.parentElement.appendChild(toggleBtn);
+
+toggleBtn.onclick = async () => {
+  HISTORY_MODE = !HISTORY_MODE;
+  toggleBtn.textContent = HISTORY_MODE ? "History: ON" : "History: OFF";
+
+  // Re-load candles + markers for the selected mode
+  await loadHistory(true);        // true = refit
+  await loadMarkers();            // refresh markers after reload
+  await fetchPosition();          // refresh lines
+};
 
 // ✅ Candles series
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
@@ -324,11 +360,13 @@ chart.subscribeCrosshairMove((param) => {
 // ----------------------------
 // Load History
 // ----------------------------
-async function loadHistory() {
+async function loadHistory(refit = false) {
   setStatus("loading history…");
 
   try {
-    const r = await fetch("/bars?limit=300", { cache: "no-store" });
+    const limit = HISTORY_MODE ? HISTORY_BAR_LIMIT : LIVE_BAR_LIMIT;
+
+    const r = await fetch(`/bars?limit=${limit}`, { cache: "no-store" });
     const data = await r.json();
 
     debugState.history = {
@@ -336,6 +374,8 @@ async function loadHistory() {
       symbol: data.symbol,
       feed: data.feed,
       bars: data.bars?.length || 0,
+      mode: HISTORY_MODE ? "HISTORY" : "LIVE",
+      limit
     };
     barEl.textContent = JSON.stringify(debugState, null, 2);
 
@@ -350,16 +390,20 @@ async function loadHistory() {
 
     candles.setData(data.bars);
 
+    // IMPORTANT: only refit when you explicitly ask (toggle / first load)
+    if (refit) {
+      chart.timeScale().fitContent();
+    }
+
+    // last bar
     const last = data.bars[data.bars.length - 1];
     lastBarTime = last.time;
     lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
     setReadoutFromBar(lastBarTime, lastBarObj);
 
-    // Markers AFTER candles.setData
-    await loadMarkers();
-
     resizeChart();
-    setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(last.time)}`);
+
+    setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(last.time)} | ${HISTORY_MODE ? "HISTORY" : "LIVE"}`);
   } catch (e) {
     console.error("loadHistory error:", e);
     setStatus("history error");
@@ -445,23 +489,15 @@ async function fetchLatestBar() {
 // ----------------------------
 // Start
 // ----------------------------
-const LATEST_BAR_POLL_MS = 5000; // 5s so new minute bar appears quickly
+const LATEST_BAR_POLL_MS = 5000; // poll 5s so new candle appears quickly
 
-let didFitOnce = false;
+(async function boot() {
+  await loadHistory(true);   // fit once on boot
+  await loadMarkers();
+  await fetchPosition();
+  await fetchLatestBar();
+})();
 
-async function loadHistoryOnce() {
-  await loadHistory();
-  if (!didFitOnce) {
-    chart.timeScale().fitContent(); // do it once only
-    didFitOnce = true;
-  }
-}
-
-loadHistoryOnce();
-fetchPosition();
-fetchLatestBar();
-
-// Poll loops
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
 setInterval(fetchPosition, 2000);
 setInterval(loadMarkers, 5000);
