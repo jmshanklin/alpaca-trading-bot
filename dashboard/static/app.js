@@ -369,14 +369,15 @@ async function fetchLatestBar() {
     lastFeed = data.feed || lastFeed;
 
     const barTime = Math.floor(new Date(data.t).getTime() / 1000);
-
+    const barTimeMin = Math.floor(barTime / 60) * 60; // ✅ snap to minute
+    
     // Update series only when new closed bar arrives
-    if (barTime !== lastBarTime) {
-      lastBarTime = barTime;
+    if (barTimeMin !== lastBarTime) {
+      lastBarTime = barTimeMin;
       lastBarObj = { open: data.o, high: data.h, low: data.l, close: data.c };
 
       candles.update({
-        time: barTime,
+        time: barTimeMin,
         open: data.o,
         high: data.h,
         low: data.l,
@@ -386,11 +387,11 @@ async function fetchLatestBar() {
       setReadoutFromBar(lastBarTime, lastBarObj);
     }
 
-    const age = nowEpochSec() - barTime;
+    const age = nowEpochSec() - barTimeMin;
     const marketOpen = isMarketOpenChicagoNow();
     const suffix = marketOpen ? (age > 120 ? ` | STALE (${age}s)` : "") : " | Market closed";
 
-    setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(barTime)}${suffix}`);
+    setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(barTimeMin)}${suffix}`);
   } catch (e) {
     console.error("fetchLatestBar error:", e);
   }
