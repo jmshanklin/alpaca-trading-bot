@@ -1,8 +1,9 @@
 // ------------------------------------
-// Alpaca Dashboard - app.js (CLEAN, UPDATED)
+// Alpaca Dashboard - app.js (CLEAN, CORRECTED, UPGRADED)
 // Chicago/Central time + crosshair time label + OHLC readout
 // + Avg Entry line (gold) + Sell Target line (blue)
 // + BUY/SELL markers (from /fills)
+// + BUY numbering resets ONLY when position size returns to ZERO
 // ------------------------------------
 
 const statusEl = document.getElementById("status");
@@ -10,7 +11,7 @@ const barEl = document.getElementById("bar");
 const chartEl = document.getElementById("chart");
 
 // ----------------------------
-//  Helpers
+// Helpers
 // ----------------------------
 function setStatus(text) {
   statusEl.textContent = text;
@@ -55,6 +56,10 @@ function isMarketOpenChicagoNow() {
   return mins >= open && mins < close;
 }
 
+function minuteFloor(tsSec) {
+  return Math.floor(tsSec / 60) * 60;
+}
+
 // ----------------------------
 // Chart
 // ----------------------------
@@ -77,14 +82,14 @@ const chart = LightweightCharts.createChart(chartEl, {
     rightOffset: 30,
     borderVisible: true,
     ticksVisible: true,
-    fixRightEdge: true,   // keeps the last candle anchored nicely
-    lockVisibleTimeRangeOnResize: true // reduces weird jumps on resize
+    fixRightEdge: true,
+    lockVisibleTimeRangeOnResize: true,
   },
   crosshair: {
     mode: 1,
     vertLine: {
       visible: true,
-      labelVisible: true, // bottom time label
+      labelVisible: true,
       style: 2,
       width: 1,
       color: "#6b7280",
@@ -123,14 +128,15 @@ const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
 });
 
 // ✅ Markers support (v4 uses series.setMarkers, v5 uses createSeriesMarkers)
-const markersLayer = (typeof candles.setMarkers === "function")
-  ? { set: (ms) => candles.setMarkers(ms) }
-  : (typeof LightweightCharts.createSeriesMarkers === "function")
-    ? (() => {
-        const p = LightweightCharts.createSeriesMarkers(candles, []);
-        return { set: (ms) => p.setMarkers(ms) };
-      })()
-    : null;
+const markersLayer =
+  typeof candles.setMarkers === "function"
+    ? { set: (ms) => candles.setMarkers(ms) }
+    : typeof LightweightCharts.createSeriesMarkers === "function"
+      ? (() => {
+          const p = LightweightCharts.createSeriesMarkers(candles, []);
+          return { set: (ms) => p.setMarkers(ms) };
+        })()
+      : null;
 
 // ✅ Price lines (define ONCE, right after candles exists)
 const avgEntryLine = candles.createPriceLine({
@@ -153,15 +159,12 @@ const sellTargetLine = candles.createPriceLine({
 
 // ----------------------------
 // BUY/SELL markers (from /fills)
+// - BUYs numbered B1, B2, B3...
+// - RESET numbering ONLY when position size returns to 0
 // ----------------------------
 let lastMarkersHash = "";
 
-function minuteFloor(tsSec) {
-  return Math.floor(tsSec / 60) * 60;
-}
-
 function hashMarkers(ms) {
-  // stable enough to avoid constant redraws
   return ms.map((m) => `${m.time}|${m.position}|${m.text}`).join(";");
 }
 
@@ -170,51 +173,74 @@ async function loadMarkers() {
     const r = await fetch("/fills?limit=500", { cache: "no-store" });
     const data = await r.json();
     if (!data.ok || !Array.isArray(data.fills)) return;
+    if (!markersLayer) return;
 
-    let buyCount = 0; // resets after every SELL
-
-    // IMPORTANT: process oldest → newest
+    // Oldest → newest is REQUIRED for correct “running position” math
     const fills = [...data.fills].sort(
       (a, b) => new Date(a.filled_at) - new Date(b.filled_at)
     );
 
-    const markers = fills.map((f) => {
+    let runningQty = 0;   // our reconstructed position size from fills
+    let buyCount = 0;     // B1, B2, ... for the current open-position group
+
+    const markers = [];
+
+    for (const f of fills) {
       const ts = Math.floor(new Date(f.filled_at).getTime() / 1000);
       const t = minuteFloor(ts);
 
       const side = (f.side || "").toLowerCase();
       const isBuy = side === "buy";
+      const isSell = side === "sell";
 
       const qty = Number(f.filled_qty || 0);
       const px = Number(f.filled_avg_price || 0);
 
-      // 🔁 Reset group on SELL
-      if (!isBuy) {
-        buyCount = 0;
-      }
+      if (!(isBuy || isSell) || !Number.isFinite(qty) || qty <= 0) continue;
 
       if (isBuy) {
-        buyCount++;
+        // If we were flat (0) and a new buy comes in, this is a NEW group.
+        if (runningQty === 0) buyCount = 0;
+
+        runningQty += qty;
+        buyCount += 1;
+
+        markers.push({
+          time: t,
+          position: "belowBar",
+          shape: "arrowUp",
+          color: "#22c55e",
+          text: `B${buyCount} ${qty}@${px.toFixed(2)}`,
+        });
       }
 
-      return {
-        time: t,
-        position: isBuy ? "belowBar" : "aboveBar",
-        shape: isBuy ? "arrowUp" : "arrowDown",
-        color: isBuy ? "#22c55e" : "#ef4444",
-        text: isBuy
-          ? `B${buyCount} ${qty}@${px.toFixed(2)}`
-          : `S ${qty}@${px.toFixed(2)}`,
-      };
-    });
+      if (isSell) {
+        // Apply sell to running position
+        runningQty = Math.max(0, runningQty - qty);
+
+        markers.push({
+          time: t,
+          position: "aboveBar",
+          shape: "arrowDown",
+          color: "#ef4444",
+          text: `S ${qty}@${px.toFixed(2)}`,
+        });
+
+        // ✅ ONLY reset when the position is fully closed
+        if (runningQty === 0) {
+          buyCount = 0;
+        }
+      }
+    }
+
+    // Keep markers ordered (helps chart)
+    markers.sort((a, b) => a.time - b.time);
 
     const h = hashMarkers(markers);
     if (h === lastMarkersHash) return;
     lastMarkersHash = h;
 
-    if (!markersLayer) return;
     markersLayer.set(markers);
-
   } catch (e) {
     console.error("loadMarkers failed", e);
   }
@@ -271,7 +297,7 @@ function setReadoutFromBar(tsSec, bar) {
 // ----------------------------
 // State + Debug
 // ----------------------------
-let lastBarTime = null; // epoch sec
+let lastBarTime = null; // epoch sec (snapped to minute)
 let lastBarObj = null;  // {open,high,low,close}
 let lastSymbol = "—";
 let lastFeed = "—";
@@ -323,15 +349,16 @@ async function loadHistory() {
     historyCount = data.bars.length;
 
     candles.setData(data.bars);
-    await loadMarkers(); // markers after data exists
-    
+
     const last = data.bars[data.bars.length - 1];
     lastBarTime = last.time;
     lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
     setReadoutFromBar(lastBarTime, lastBarObj);
 
-    resizeChart();
+    // Markers AFTER candles.setData
+    await loadMarkers();
 
+    resizeChart();
     setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(last.time)}`);
   } catch (e) {
     console.error("loadHistory error:", e);
@@ -368,7 +395,7 @@ async function fetchPosition() {
 }
 
 // ----------------------------
-// Latest closed bar
+// Latest closed bar (snapped to minute)
 // ----------------------------
 async function fetchLatestBar() {
   try {
@@ -385,8 +412,7 @@ async function fetchLatestBar() {
 
     const barTime = Math.floor(new Date(data.t).getTime() / 1000);
     const barTimeMin = Math.floor(barTime / 60) * 60; // ✅ snap to minute
-    
-    // Update series only when new closed bar arrives
+
     if (barTimeMin !== lastBarTime) {
       lastBarTime = barTimeMin;
       lastBarObj = { open: data.o, high: data.h, low: data.l, close: data.c };
@@ -400,6 +426,10 @@ async function fetchLatestBar() {
       });
 
       setReadoutFromBar(lastBarTime, lastBarObj);
+
+      // Fills/markers often change right after a new bar closes (and after orders fill)
+      // so refresh markers when a new bar arrives.
+      loadMarkers().catch(() => {});
     }
 
     const age = nowEpochSec() - barTimeMin;
@@ -415,12 +445,12 @@ async function fetchLatestBar() {
 // ----------------------------
 // Start
 // ----------------------------
-const LATEST_BAR_POLL_MS = 5000; // poll 5s so the new candle appears quickly after the minute closes
+const LATEST_BAR_POLL_MS = 5000; // 5s so new minute bar appears quickly
 
 let didFitOnce = false;
 
 async function loadHistoryOnce() {
-  await loadHistory();              // your existing loadHistory()
+  await loadHistory();
   if (!didFitOnce) {
     chart.timeScale().fitContent(); // do it once only
     didFitOnce = true;
@@ -430,12 +460,11 @@ async function loadHistoryOnce() {
 loadHistoryOnce();
 fetchPosition();
 fetchLatestBar();
-fetchMarkers();
 
+// Poll loops
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
 setInterval(fetchPosition, 2000);
-setInterval(fetchMarkers, 5000);
+setInterval(loadMarkers, 5000);
 
 // IMPORTANT: do NOT keep reloading history every 60s
 // setInterval(loadHistory, 60000);
-
