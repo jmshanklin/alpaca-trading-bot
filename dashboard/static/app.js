@@ -308,8 +308,7 @@ async function loadHistory() {
 
     candles.setData(data.bars);
     await loadMarkers(); // markers after data exists
-    chart.timeScale().fitContent();
-
+    
     const last = data.bars[data.bars.length - 1];
     lastBarTime = last.time;
     lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
