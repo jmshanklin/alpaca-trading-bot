@@ -171,32 +171,42 @@ async function loadMarkers() {
     const data = await r.json();
     if (!data.ok || !Array.isArray(data.fills)) return;
 
-    let buyCount = 0; // 👈 counts BUYs in order
+    let buyCount = 0; // resets after every SELL
 
-    const markers = data.fills
-      .map((f) => {
-        const ts = Math.floor(new Date(f.filled_at).getTime() / 1000);
-        const t = minuteFloor(ts);
+    // IMPORTANT: process oldest → newest
+    const fills = [...data.fills].sort(
+      (a, b) => new Date(a.filled_at) - new Date(b.filled_at)
+    );
 
-        const side = (f.side || "").toLowerCase();
-        const isBuy = side === "buy";
+    const markers = fills.map((f) => {
+      const ts = Math.floor(new Date(f.filled_at).getTime() / 1000);
+      const t = minuteFloor(ts);
 
-        const qty = Number(f.filled_qty || 0);
-        const px = Number(f.filled_avg_price || 0);
+      const side = (f.side || "").toLowerCase();
+      const isBuy = side === "buy";
 
-        if (isBuy) buyCount++; // 👈 increment per BUY
+      const qty = Number(f.filled_qty || 0);
+      const px = Number(f.filled_avg_price || 0);
 
-        return {
-          time: t,
-          position: isBuy ? "belowBar" : "aboveBar",
-          shape: isBuy ? "arrowUp" : "arrowDown",
-          color: isBuy ? "#22c55e" : "#ef4444",
-          text: isBuy
-            ? `B${buyCount} ${qty}@${px.toFixed(2)}`
-            : `S ${qty}@${px.toFixed(2)}`,
-        };
-      })
-      .sort((a, b) => a.time - b.time);
+      // 🔁 Reset group on SELL
+      if (!isBuy) {
+        buyCount = 0;
+      }
+
+      if (isBuy) {
+        buyCount++;
+      }
+
+      return {
+        time: t,
+        position: isBuy ? "belowBar" : "aboveBar",
+        shape: isBuy ? "arrowUp" : "arrowDown",
+        color: isBuy ? "#22c55e" : "#ef4444",
+        text: isBuy
+          ? `B${buyCount} ${qty}@${px.toFixed(2)}`
+          : `S ${qty}@${px.toFixed(2)}`,
+      };
+    });
 
     const h = hashMarkers(markers);
     if (h === lastMarkersHash) return;
