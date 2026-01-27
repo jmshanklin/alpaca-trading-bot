@@ -171,10 +171,12 @@ async function loadMarkers() {
     const data = await r.json();
     if (!data.ok || !Array.isArray(data.fills)) return;
 
+    let buyCount = 0; // 👈 counts BUYs in order
+
     const markers = data.fills
       .map((f) => {
         const ts = Math.floor(new Date(f.filled_at).getTime() / 1000);
-        const t = minuteFloor(ts); // align to 1-min bars
+        const t = minuteFloor(ts);
 
         const side = (f.side || "").toLowerCase();
         const isBuy = side === "buy";
@@ -182,12 +184,16 @@ async function loadMarkers() {
         const qty = Number(f.filled_qty || 0);
         const px = Number(f.filled_avg_price || 0);
 
+        if (isBuy) buyCount++; // 👈 increment per BUY
+
         return {
           time: t,
           position: isBuy ? "belowBar" : "aboveBar",
           shape: isBuy ? "arrowUp" : "arrowDown",
           color: isBuy ? "#22c55e" : "#ef4444",
-          text: `${isBuy ? "B" : "S"} ${qty}@${px.toFixed(2)}`,
+          text: isBuy
+            ? `B${buyCount} ${qty}@${px.toFixed(2)}`
+            : `S ${qty}@${px.toFixed(2)}`,
         };
       })
       .sort((a, b) => a.time - b.time);
@@ -196,7 +202,7 @@ async function loadMarkers() {
     if (h === lastMarkersHash) return;
     lastMarkersHash = h;
 
-    if (!markersLayer) return; // no marker support
+    if (!markersLayer) return;
     markersLayer.set(markers);
 
   } catch (e) {
