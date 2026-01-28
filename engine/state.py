@@ -8,7 +8,7 @@ from typing import Optional
 import psycopg2
 from psycopg2.extras import Json
 
-from .grid import GridState
+from grid import GridState
 
 @dataclass
 class Persisted:
