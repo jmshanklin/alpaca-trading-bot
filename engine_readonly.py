@@ -53,14 +53,18 @@ def print_startup_banner(*, live_endpoint: bool, is_leader: bool):
     logger.warning("==============================================")
     logger.warning("🚀 BOT STARTUP CONFIRMATION BANNER")
     logger.warning("----------------------------------------------")
-    logger.warning(f"MODE:         {mode}")
-    logger.warning(f"SYMBOL:       {SYMBOL}")
-    logger.warning(f"SELL_PCT:     {SELL_PCT} ({SELL_PCT * 100:.3f}%)")
-    logger.warning(f"LEADER:       {is_leader}")
-    logger.warning(f"ORDERS:       {orders}")
-    logger.warning(f"DRY_RUN:      {DRY_RUN}")
-    logger.warning(f"KILL_SWITCH:  {KILL_SWITCH}")
-    logger.warning(f"ENDPOINT:     {ALPACA_BASE_URL}")
+    logger.warning(f"MODE:               {mode}")
+    logger.warning(f"SYMBOL:             {SYMBOL}")
+    logger.warning(f"SELL_RISE_USD:      {SELL_RISE_USD:.2f}")
+    logger.warning(f"GRID_STEP_START:    {GRID_STEP_START_USD:.2f}")
+    logger.warning(f"GRID_TIER_SIZE:     {GRID_TIER_SIZE}")
+    logger.warning(f"GRID_STEP_INC:      {GRID_STEP_INC_USD:.2f}")
+    logger.warning(f"LEADER:             {is_leader}")
+    logger.warning(f"ORDERS:             {orders}")
+    logger.warning(f"DRY_RUN:            {DRY_RUN}")
+    logger.warning(f"KILL_SWITCH:        {KILL_SWITCH}")
+    logger.warning(f"ENDPOINT:           {ALPACA_BASE_URL}")
+    logger.warning(f"DATA_FEED:          {ALPACA_DATA_FEED}")
     logger.warning("==============================================")
     logger.warning("")
 
@@ -85,7 +89,7 @@ def maybe_print_heartbeat(*, pos_qty, avg_entry, sell_target, is_leader):
     logger.warning(f"SYMBOL:     {SYMBOL}")
     logger.warning(f"POS_QTY:    {int(pos_qty)}")
     logger.warning(f"AVG_ENTRY:  {avg_str}")
-    logger.warning(f"SELL_PCT:   {SELL_PCT * 100:.3f}%")
+    logger.warning(f"SELL_RISE:  ${SELL_RISE_USD:.2f}")
     logger.warning(f"SELL_TGT:   {target_str}")
     logger.warning(f"LEADER:     {is_leader}")
     logger.warning(f"KILL_SW:    {KILL_SWITCH}")
@@ -102,7 +106,7 @@ def print_profit_tracker_banner(
     unrealized_pl: Optional[float],
     unrealized_plpc: Optional[float],
     market_value: Optional[float],
-    sell_pct: float,
+    sell_rise_usd: float,
     sell_target: Optional[float],
     is_leader: bool,
 ):
@@ -119,11 +123,12 @@ def print_profit_tracker_banner(
     logger.warning(f"UNRLZD_P/L:  ${float(unrealized_pl):,.2f}" if unrealized_pl is not None else "UNRLZD_P/L:  None")
     logger.warning(f"UNRLZD_%:    {float(unrealized_plpc) * 100.0:.3f}%" if unrealized_plpc is not None else "UNRLZD_%:    None")
 
-    logger.warning(f"SELL_PCT:    {float(sell_pct) * 100.0:.3f}%")
+    logger.warning(f"SELL_RISE:   ${float(sell_rise_usd):.2f}")
     logger.warning(f"SELL_TGT:    {float(sell_target):.2f}" if sell_target is not None else "SELL_TGT:    None")
     logger.warning("------------------------------------------------")
     logger.warning("")
-    
+
+
 def print_session_snapshot_line(
     *,
     symbol: str,
@@ -143,20 +148,12 @@ def print_session_snapshot_line(
     else:
         vwap_str = "—"
 
-        # If we're flat, do NOT display P/L (avoids confusing negative values with QTY=0)
     if int(pos_qty) <= 0:
         pl_str = "—"
         plpc_str = "—"
     else:
-        if unrealized_pl is not None:
-            pl_str = f"${unrealized_pl:,.2f}"
-        else:
-            pl_str = "—"
-
-        if unrealized_plpc is not None:
-            plpc_str = f"{unrealized_plpc * 100.0:+.2f}%"
-        else:
-            plpc_str = "—"
+        pl_str = f"${unrealized_pl:,.2f}" if unrealized_pl is not None else "—"
+        plpc_str = f"{unrealized_plpc * 100.0:+.2f}%" if unrealized_plpc is not None else "—"
 
     logger.warning(
         f"📌 SNAPSHOT {symbol} | "
@@ -166,7 +163,8 @@ def print_session_snapshot_line(
         f"QTY:{int(pos_qty)} | "
         f"LEADER:{is_leader}"
     )
-    
+
+
 def compute_session_stats_1m(symbol: str, now_utc: datetime):
     """
     Returns:
@@ -176,7 +174,6 @@ def compute_session_stats_1m(symbol: str, now_utc: datetime):
     try:
         now_et = now_utc.astimezone(ET)
         session_start_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-        # If we're somehow before 9:30 ET (rare with market-open checks), just bail.
         if now_et < session_start_et:
             return None, None, None, None
 
@@ -219,7 +216,6 @@ def compute_session_stats_1m(symbol: str, now_utc: datetime):
             if session_low is None or l < session_low:
                 session_low = l
 
-            # VWAP approximation using close * volume
             if v > 0:
                 pv_sum += c * v
                 vol_sum += v
@@ -254,7 +250,6 @@ def maybe_print_session_snapshot(
     if (now_ts - last_ts) < every:
         return
 
-    # Update throttle timestamp first (prevents spam on errors/restarts)
     state["last_session_snapshot_ts"] = now_ts
 
     session_high, session_low, vwap, _ = compute_session_stats_1m(symbol, now_utc)
@@ -286,11 +281,10 @@ def maybe_print_profit_tracker_banner(
     unrealized_pl: Optional[float],
     unrealized_plpc: Optional[float],
     market_value: Optional[float],
-    sell_pct: float,
+    sell_rise_usd: float,
     sell_target: Optional[float],
     is_leader: bool,
 ):
-    # Only for real trading (paper/live) — not simulation
     if DRY_RUN:
         return
 
@@ -312,7 +306,7 @@ def maybe_print_profit_tracker_banner(
         unrealized_pl=unrealized_pl,
         unrealized_plpc=unrealized_plpc,
         market_value=market_value,
-        sell_pct=sell_pct,
+        sell_rise_usd=sell_rise_usd,
         sell_target=sell_target,
         is_leader=is_leader,
     )
@@ -327,7 +321,7 @@ def print_daily_summary_banner(
     pos_qty: float,
     owned_qty: int,
     avg_entry: Optional[float],
-    sell_pct: float,
+    sell_rise_usd: float,
     sell_target: Optional[float],
     buy_count_total: int,
     group_buy_count: int,
@@ -348,7 +342,7 @@ def print_daily_summary_banner(
     logger.warning(f"POS_QTY:       {int(pos_qty)}")
     logger.warning(f"OWNED_QTY:     {int(owned_qty)}")
     logger.warning(f"AVG_ENTRY:     {float(avg_entry):.2f}" if avg_entry is not None else "AVG_ENTRY:     None")
-    logger.warning(f"SELL_PCT:      {float(sell_pct) * 100.0:.3f}%")
+    logger.warning(f"SELL_RISE_USD: ${float(sell_rise_usd):.2f}")
     logger.warning(f"SELL_TARGET:   {float(sell_target):.2f}" if sell_target is not None else "SELL_TARGET:   None")
     logger.warning(f"BUYS_TODAY_ET: {int(buys_today_et)}")
     logger.warning(f"BUY_COUNT_TTL: {int(buy_count_total)}")
@@ -382,7 +376,7 @@ def maybe_print_daily_summary_banner(
     pos_qty: float,
     owned_qty: int,
     avg_entry: Optional[float],
-    sell_pct: float,
+    sell_rise_usd: float,
     sell_target: Optional[float],
     buy_count_total: int,
     group_buy_count: int,
@@ -391,16 +385,12 @@ def maybe_print_daily_summary_banner(
     unrealized_plpc: Optional[float],
     market_value: Optional[float],
 ) -> bool:
-    """
-    Returns True if it printed (so caller can persist immediately).
-    """
     if not DAILY_SUMMARY_BANNER:
         return False
 
     now_et = now_utc.astimezone(ET)
     date_et = now_et.date().isoformat()
 
-    # Only once per ET day
     if state.get("last_daily_summary_date_et") == date_et:
         return False
 
@@ -412,11 +402,9 @@ def maybe_print_daily_summary_banner(
     target_minutes = target_h * 60 + target_m
     now_minutes = now_et.hour * 60 + now_et.minute
 
-    # 0..5 minute window starting at the target time
     if not (target_minutes <= now_minutes <= target_minutes + 5):
         return False
 
-    # Mark as printed BEFORE logging (avoids spam on restarts)
     state["last_daily_summary_date_et"] = date_et
 
     print_daily_summary_banner(
@@ -427,7 +415,7 @@ def maybe_print_daily_summary_banner(
         pos_qty=pos_qty,
         owned_qty=owned_qty,
         avg_entry=avg_entry,
-        sell_pct=sell_pct,
+        sell_rise_usd=sell_rise_usd,
         sell_target=sell_target,
         buy_count_total=buy_count_total,
         group_buy_count=group_buy_count,
@@ -444,29 +432,25 @@ def print_first_buy_banner(
     live_endpoint: bool,
     is_leader: bool,
     symbol: str,
-    close: float,
+    anchor: float,
     qty: int,
-    avg_entry: Optional[float],
-    sell_pct: float,
     sell_target: Optional[float],
 ):
     mode = "SIMULATION (DRY_RUN)" if DRY_RUN else ("LIVE PAPER" if not live_endpoint else "LIVE REAL MONEY")
     orders = "ENABLED" if (is_leader and not KILL_SWITCH) else "BLOCKED"
 
-    logger.warning("✅ FIRST BUY CONFIRMED")
+    logger.warning("✅ FIRST BUY CONFIRMED (GRID GROUP START)")
     logger.warning("----------------------------------------------")
-    logger.warning(f"MODE:     {mode}")
-    logger.warning(f"ORDERS:   {orders}")
-    logger.warning(f"SYMBOL:   {symbol}")
-    logger.warning(f"BUY_CLS:  {close:.2f}")
-    logger.warning(f"BUY_QTY:  {qty}")
-    if avg_entry is not None:
-        logger.warning(f"AVG_ENT:  {float(avg_entry):.2f}")
-    logger.warning(f"SELL_PCT: {float(sell_pct) * 100:.3f}%")
+    logger.warning(f"MODE:      {mode}")
+    logger.warning(f"ORDERS:    {orders}")
+    logger.warning(f"SYMBOL:    {symbol}")
+    logger.warning(f"ANCHOR:    {anchor:.2f}")
+    logger.warning(f"BUY_QTY:   {qty}")
+    logger.warning(f"SELL_RISE: ${SELL_RISE_USD:.2f}")
     if sell_target is not None:
-        logger.warning(f"SELL_TGT: {float(sell_target):.2f}")
-    logger.warning(f"LEADER:   {is_leader}")
-    logger.warning(f"KILL_SW:  {KILL_SWITCH}")
+        logger.warning(f"SELL_TGT:  {float(sell_target):.2f}")
+    logger.warning(f"LEADER:    {is_leader}")
+    logger.warning(f"KILL_SW:   {KILL_SWITCH}")
     logger.warning("----------------------------------------------")
 
 
@@ -474,18 +458,15 @@ def print_sell_arming_banner(
     *,
     symbol: str,
     close_price: float,
-    avg_entry: Optional[float],
     sell_target: float,
     arm_price: float,
     leader: bool,
     dry_run: bool,
 ):
-    logger.warning("⚠️  SELL ARMING")
+    logger.warning("⚠️  SELL ARMING (approaching target)")
     logger.warning("------------------------------------------------")
     logger.warning(f"SYMBOL:    {symbol}")
     logger.warning(f"CLOSE:     {close_price:.2f}")
-    if avg_entry is not None:
-        logger.warning(f"AVG_ENTRY: {avg_entry:.2f}")
     logger.warning(f"TARGET:    {sell_target:.2f}")
     logger.warning(f"ARM_AT:    {arm_price:.2f}")
     logger.warning(f"LEADER:    {leader}")
@@ -498,19 +479,19 @@ def print_sell_banner(
     symbol: str,
     sell_qty: int,
     close_price: float,
-    avg_entry: Optional[float],
+    anchor: Optional[float],
     sell_target: Optional[float],
     pos_qty_before: float,
     leader: bool,
     dry_run: bool,
 ):
-    logger.warning("✅ SELL CONFIRMED")
+    logger.warning("✅ SELL CONFIRMED (GRID GROUP EXIT)")
     logger.warning("----------------------------------------------")
     logger.warning(f"SYMBOL:      {symbol}")
     logger.warning(f"SELL_QTY:    {sell_qty}")
     logger.warning(f"CLOSE:       {close_price:.2f}")
     logger.warning(f"POS_BEFORE:  {pos_qty_before:.4f}")
-    logger.warning(f"AVG_ENTRY:   {(f'{avg_entry:.2f}' if avg_entry is not None else 'None')}")
+    logger.warning(f"ANCHOR:      {(f'{anchor:.2f}' if anchor is not None else 'None')}")
     logger.warning(f"SELL_TGT:    {(f'{sell_target:.2f}' if sell_target is not None else 'None')}")
     logger.warning(f"LEADER:      {leader}")
     logger.warning(f"DRY_RUN:     {dry_run}")
@@ -641,10 +622,15 @@ MAX_BUYS_PER_TICK = env_int("MAX_BUYS_PER_TICK", 1)
 LOG_POSITION_CHANGES = env_bool("LOG_POSITION_CHANGES", True)
 
 STATE_SAVE_SEC = env_float("STATE_SAVE_SEC", 0.0)
-SELL_PCT = env_float("SELL_PCT", 0.0)
+
+# NEW: Grid / group sell parameters
+SELL_RISE_USD = env_float("SELL_RISE_USD", 2.0)          # $X above group anchor
+GRID_STEP_START_USD = env_float("GRID_STEP_START_USD", 1.0)
+GRID_TIER_SIZE = env_int("GRID_TIER_SIZE", 5)
+GRID_STEP_INC_USD = env_float("GRID_STEP_INC_USD", 1.0)
 
 SELL_ARM_BANNER = env_bool("SELL_ARM_BANNER", True)
-SELL_ARM_PCT = env_float("SELL_ARM_PCT", 0.0005)  # 0.05% below target
+SELL_ARM_PCT = env_float("SELL_ARM_PCT", 0.0005)  # still used as a fraction of target for arming banner
 
 RESET_SIM_OWNED_ON_START = env_bool("RESET_SIM_OWNED_ON_START", False)
 
@@ -673,12 +659,10 @@ ALPACA_SECRET_KEY = env_str("ALPACA_SECRET_KEY") or env_str("APCA_API_SECRET_KEY
 ALPACA_BASE_URL = env_str("ALPACA_BASE_URL") or env_str("APCA_API_BASE_URL") or "https://paper-api.alpaca.markets"
 
 SYMBOL = env_str("ENGINE_SYMBOL", "TSLA").upper()
-ALPACA_DATA_FEED = env_str("ALPACA_DATA_FEED", "iex").lower()
-logger.info(f"CONFIG alpaca_data_feed={ALPACA_DATA_FEED}")
 
-PROFIT_TRACKER_EVERY_SEC = env_float("PROFIT_TRACKER_EVERY_SEC", 300.0)  # 5 minutes
-DAILY_SUMMARY_BANNER = env_bool("DAILY_SUMMARY_BANNER", True)
-DAILY_SUMMARY_ET_TIME = env_str("DAILY_SUMMARY_ET_TIME", "15:59")  # 3:59pm ET
+# IMPORTANT: support either ALPACA_DATA_FEED or APCA_DATA_FEED
+ALPACA_DATA_FEED = (env_str("ALPACA_DATA_FEED", "") or env_str("APCA_DATA_FEED", "iex")).lower()
+logger.info(f"CONFIG alpaca_data_feed={ALPACA_DATA_FEED}")
 
 # =========================
 # Self-test / Heartbeat mode (after-hours safe)
@@ -786,11 +770,10 @@ def run_self_test(api_client, symbol: str, *, market_is_open: bool) -> bool:
             last_ts = last_ts.replace(tzinfo=timezone.utc)
 
         age_min = (now_utc - last_ts).total_seconds() / 60.0
-        red_count = sum(1 for b in bars_list if float(getattr(b, "c", 0.0)) < float(getattr(b, "o", 0.0)))
 
         logger.warning(
             f"SELF_TEST (OPEN) bars={len(bars_list)} last_ts={last_ts.isoformat()} age_min={age_min:.1f} "
-            f"last_o={float(last.o):.2f} last_c={float(last.c):.2f} red_count={red_count}"
+            f"last_o={float(last.o):.2f} last_c={float(last.c):.2f}"
         )
 
         if age_min > max_age_min:
@@ -800,7 +783,6 @@ def run_self_test(api_client, symbol: str, *, market_is_open: bool) -> bool:
         logger.warning("SELF_TEST PASS ✅ (OPEN)")
         return True
 
-    # CLOSED
     start = now_utc - timedelta(days=SELF_TEST_DAILY_LOOKBACK_DAYS)
     tf = TimeFrame.Day
     limit = max(5, min(365, SELF_TEST_DAILY_LOOKBACK_DAYS + 5))
@@ -837,11 +819,10 @@ def run_self_test(api_client, symbol: str, *, market_is_open: bool) -> bool:
         last_ts = last_ts.replace(tzinfo=timezone.utc)
 
     age_days = (now_utc - last_ts).total_seconds() / (60.0 * 60.0 * 24.0)
-    red_count = sum(1 for b in bars_list if float(getattr(b, "c", 0.0)) < float(getattr(b, "o", 0.0)))
 
     logger.warning(
         f"SELF_TEST (CLOSED) daily_bars={len(bars_list)} last_ts={last_ts.isoformat()} age_days={age_days:.2f} "
-        f"last_o={float(last.o):.2f} last_c={float(last.c):.2f} red_days={red_count}"
+        f"last_o={float(last.o):.2f} last_c={float(last.c):.2f}"
     )
 
     if age_days > float(SELF_TEST_DAILY_MAX_AGE_DAYS):
@@ -974,14 +955,6 @@ def _is_transient_msg(msg: str) -> bool:
 
 
 def get_position(symbol: str):
-    """
-    Returns Alpaca position object or None if no position exists.
-
-    HARDENED (fixes your log spam):
-    - "position does not exist" => normal flat, return None (NO retries, NO errors)
-    - transient errors => retry a few times
-    - other errors => raise (so we don't mistakenly treat unknown as flat)
-    """
     tries = 5
     base_sleep = 0.4
     max_sleep = 3.0
@@ -992,11 +965,9 @@ def get_position(symbol: str):
         except Exception as e:
             msg = str(e).lower()
 
-            # Normal condition when flat
             if "position does not exist" in msg:
                 return None
 
-            # Retry only if transient
             if _is_transient_msg(msg) and attempt < tries:
                 sleep_s = min(max_sleep, base_sleep * (2 ** (attempt - 1)))
                 sleep_s = sleep_s * (0.8 + 0.4 * random.random())
@@ -1004,17 +975,13 @@ def get_position(symbol: str):
                 time.sleep(sleep_s)
                 continue
 
-            # Unknown/fatal -> do NOT treat as flat
             logger.error(f"get_position: unexpected error (NOT treating as flat): {e}", exc_info=True)
             raise
 
-    raise RuntimeError("get_position: failed after retries")  # should be unreachable
+    raise RuntimeError("get_position: failed after retries")
 
 
 def fetch_position_snapshot(symbol: str):
-    """
-    Single call to Alpaca for position, returns derived fields.
-    """
     pos_obj = get_position(symbol)
     if not pos_obj:
         return {
@@ -1047,17 +1014,7 @@ def fetch_position_snapshot(symbol: str):
     }
 
 
-def get_position_qty(symbol: str) -> float:
-    snap = fetch_position_snapshot(symbol)
-    return float(snap["pos_qty"])
-
-
 def confirm_flat_position(symbol: str, *, checks: int = 2, delay_sec: float = 0.25) -> bool:
-    """
-    HARDENED flat check:
-    - returns True only if Alpaca is consistently flat
-    - if any check errors, returns False (do NOT reset anything)
-    """
     for i in range(checks):
         try:
             snap = fetch_position_snapshot(symbol)
@@ -1137,10 +1094,23 @@ def pick_latest_closed_bar(symbol: str, now_utc: datetime):
         return None
 
 
-def reset_group_state(state: dict) -> None:
-    state["group_anchor_close"] = None
-    state["last_red_buy_close"] = None
-    state["group_buy_count"] = 0
+# =========================
+# Grid state helpers
+# =========================
+def reset_grid_state(state: dict) -> None:
+    # Group/ladder memory
+    state["grid_ref_price"] = None          # trailing reference while waiting for first buy
+    state["grid_anchor_price"] = None       # first buy anchor (group)
+    state["grid_last_trigger"] = None       # last buy trigger price
+    state["grid_step_usd"] = float(GRID_STEP_START_USD)
+    state["grid_tier_count"] = 0            # buys within current step tier
+    state["grid_next_trigger"] = None       # next buy trigger price
+    state["group_buy_count"] = 0            # group buys (for your logs)
+
+    # Banners
+    state["first_buy_banner_shown"] = False
+    state["sell_banner_shown"] = False
+    state["sell_arm_banner_shown"] = False
 
 
 def get_owned_qty(state: dict) -> int:
@@ -1156,35 +1126,85 @@ def set_owned_qty(state: dict, new_qty: int) -> None:
     state[key] = max(0, int(new_qty))
 
 
+def grid_init_if_needed(state: dict, close_price: float) -> None:
+    """
+    If we're flat and haven't started a group, maintain a trailing reference price
+    so "drops $1" means "drops from a recent local high while waiting".
+    """
+    ref = state.get("grid_ref_price")
+    step = float(state.get("grid_step_usd") or GRID_STEP_START_USD)
+
+    if ref is None:
+        state["grid_ref_price"] = float(close_price)
+    else:
+        # trail the reference upward while waiting (so we buy on drops from highs)
+        state["grid_ref_price"] = max(float(ref), float(close_price))
+
+    ref2 = float(state["grid_ref_price"])
+    state["grid_next_trigger"] = ref2 - step
+
+
+def grid_should_buy(state: dict, close_price: float) -> bool:
+    nxt = state.get("grid_next_trigger")
+    if nxt is None:
+        return False
+    return float(close_price) <= float(nxt)
+
+
+def grid_advance_after_buy(state: dict) -> None:
+    """
+    After a buy triggers at grid_next_trigger, advance:
+      last_trigger = next_trigger
+      tier_count += 1
+      if tier_count == GRID_TIER_SIZE: step += GRID_STEP_INC_USD, tier_count=0
+      next_trigger = last_trigger - step
+    """
+    next_trigger = float(state["grid_next_trigger"])
+    state["grid_last_trigger"] = next_trigger
+
+    tier_count = int(state.get("grid_tier_count", 0)) + 1
+    step = float(state.get("grid_step_usd", GRID_STEP_START_USD))
+    tier_size = int(GRID_TIER_SIZE)
+
+    if tier_count >= tier_size:
+        step = step + float(GRID_STEP_INC_USD)
+        tier_count = 0
+
+    state["grid_step_usd"] = step
+    state["grid_tier_count"] = tier_count
+    state["grid_next_trigger"] = float(state["grid_last_trigger"]) - step
+
+
 # =========================
 # Main
 # =========================
 def main():
     live_endpoint = is_live_endpoint(ALPACA_BASE_URL)
 
-    logger.info(f"ENGINE_START mode=RED_CLOSE_GROUP_SELL_AVG_ENTRY_PCT dry_run={DRY_RUN} symbol={SYMBOL}")
+    logger.info(f"ENGINE_START mode=GRID_DROP_ADAPTIVE_STEP_GROUP_SELL_RISE_USD dry_run={DRY_RUN} symbol={SYMBOL}")
 
     logger.info(
         "ENGINE_CONFIG "
         f"symbol={SYMBOL} order_qty={ORDER_QTY} poll_sec={POLL_SEC} "
         f"fill_timeout_sec={FILL_TIMEOUT_SEC} fill_poll_sec={FILL_POLL_SEC} "
         f"max_buys_per_tick={MAX_BUYS_PER_TICK} log_position_changes={LOG_POSITION_CHANGES} "
-        f"state_path={STATE_PATH} state_save_sec={STATE_SAVE_SEC} sell_pct={SELL_PCT} "
+        f"state_path={STATE_PATH} state_save_sec={STATE_SAVE_SEC} "
+        f"sell_rise_usd={SELL_RISE_USD} grid_step_start_usd={GRID_STEP_START_USD} "
+        f"grid_tier_size={GRID_TIER_SIZE} grid_step_inc_usd={GRID_STEP_INC_USD} "
         f"reset_sim_owned_on_start={RESET_SIM_OWNED_ON_START} kill_switch={KILL_SWITCH} "
         f"max_dollars_per_buy={MAX_DOLLARS_PER_BUY} max_position_qty={MAX_POSITION_QTY} "
         f"max_buys_per_day={MAX_BUYS_PER_DAY} trade_start_et={TRADE_START_ET} trade_end_et={TRADE_END_ET} "
         f"dry_run={DRY_RUN} alpaca_base_url={ALPACA_BASE_URL} alpaca_is_live_endpoint={live_endpoint} "
-        f"db_enabled={db_enabled()} leader_lock_key={LEADER_LOCK_KEY if db_enabled() else ''} "
+        f"data_feed={ALPACA_DATA_FEED} db_enabled={db_enabled()} "
+        f"leader_lock_key={LEADER_LOCK_KEY if db_enabled() else ''} "
         f"standby_only={STANDBY_ONLY} standby_poll_sec={STANDBY_POLL_SEC} "
         f"self_test={SELF_TEST} self_test_every_sec={SELF_TEST_EVERY_SEC} self_test_no_orders={SELF_TEST_NO_ORDERS}"
     )
 
-    # Live trading confirmation gate (ONLY live endpoint + DRY_RUN=false)
     if (not DRY_RUN) and live_endpoint:
         if LIVE_TRADING_CONFIRM != "I_UNDERSTAND":
             raise RuntimeError("LIVE trading blocked: set LIVE_TRADING_CONFIRM=I_UNDERSTAND to enable live orders.")
 
-    # ---- Postgres + leader lock (optional) ----
     db_conn = None
     state_id = ""
     is_leader = True
@@ -1222,8 +1242,6 @@ def main():
         except Exception:
             last_bar_ts = None
 
-    group_anchor_close = state.get("group_anchor_close")
-    last_red_buy_close = state.get("last_red_buy_close")
     buy_count_total = int(state.get("buy_count_total", 0))
     group_buy_count = int(state.get("group_buy_count", 0))
 
@@ -1240,6 +1258,15 @@ def main():
     state.setdefault("last_daily_summary_date_et", None)
     state.setdefault("last_session_snapshot_ts", 0.0)
 
+    # Grid defaults if missing
+    state.setdefault("grid_ref_price", None)
+    state.setdefault("grid_anchor_price", None)
+    state.setdefault("grid_last_trigger", None)
+    state.setdefault("grid_step_usd", float(GRID_STEP_START_USD))
+    state.setdefault("grid_tier_count", 0)
+    state.setdefault("grid_next_trigger", None)
+    state.setdefault("group_buy_count", 0)
+
     if DRY_RUN and RESET_SIM_OWNED_ON_START:
         old_sim = int(state.get("sim_owned_qty", 0))
         if old_sim != 0:
@@ -1248,46 +1275,37 @@ def main():
 
     logger.info(
         "STATE_LOADED "
-        f"last_bar_ts={last_bar_ts_iso} group_anchor_close={group_anchor_close} last_red_buy_close={last_red_buy_close} "
-        f"buy_count_total={buy_count_total} group_buy_count={group_buy_count} "
+        f"last_bar_ts={last_bar_ts_iso} "
+        f"grid_ref_price={state.get('grid_ref_price')} grid_anchor_price={state.get('grid_anchor_price')} "
+        f"grid_last_trigger={state.get('grid_last_trigger')} grid_step_usd={state.get('grid_step_usd')} "
+        f"grid_tier_count={state.get('grid_tier_count')} grid_next_trigger={state.get('grid_next_trigger')} "
+        f"buy_count_total={buy_count_total} group_buy_count={int(state.get('group_buy_count', 0))} "
         f"strategy_owned_qty={int(state.get('strategy_owned_qty', 0))} sim_owned_qty={int(state.get('sim_owned_qty', 0))} "
         f"buys_today_date_et={state.get('buys_today_date_et')} buys_today_et={int(state.get('buys_today_et', 0))}"
     )
 
     # ------------------------------------------------------------
     # BOOT-TIME RECONCILE (DB state -> Alpaca reality)
-    # If Alpaca is flat, wipe persisted group memory + counters
-    # so the bot starts clean after manual liquidation.
+    # If Alpaca is flat, wipe persisted grid memory + counters
     # ------------------------------------------------------------
     try:
         boot_snap = fetch_position_snapshot(SYMBOL)
         boot_pos_qty = float(boot_snap["pos_qty"])
     except Exception:
-        boot_pos_qty = -1.0  # unknown
+        boot_pos_qty = -1.0
 
     if int(boot_pos_qty) == 0:
-        logger.warning("BOOT_RECONCILE: Alpaca position is 0 -> clearing persisted state counters + group memory")
+        logger.warning("BOOT_RECONCILE: Alpaca position is 0 -> clearing persisted grid state + counters")
 
-        reset_group_state(state)
-        group_anchor_close = None
-        last_red_buy_close = None
-        group_buy_count = 0
-
+        reset_grid_state(state)
         state["buy_count_total"] = 0
         state["buys_today_et"] = 0
         state["buys_today_date_et"] = et_date_str(datetime.now(timezone.utc))
-
         state["strategy_owned_qty"] = 0
         state["sim_owned_qty"] = 0
 
-        state["first_buy_banner_shown"] = False
-        state["sell_banner_shown"] = False
-        state["sell_arm_banner_shown"] = False
-
         payload = {
             "last_bar_ts": state.get("last_bar_ts"),
-            "group_anchor_close": None,
-            "last_red_buy_close": None,
             "buy_count_total": 0,
             "group_buy_count": 0,
             "strategy_owned_qty": 0,
@@ -1295,6 +1313,12 @@ def main():
             "buys_today_date_et": state["buys_today_date_et"],
             "buys_today_et": 0,
             "symbol": SYMBOL,
+            "grid_ref_price": None,
+            "grid_anchor_price": None,
+            "grid_last_trigger": None,
+            "grid_step_usd": float(GRID_STEP_START_USD),
+            "grid_tier_count": 0,
+            "grid_next_trigger": None,
             "last_profit_banner_ts": float(state.get("last_profit_banner_ts", 0.0)),
             "last_daily_summary_date_et": state.get("last_daily_summary_date_et"),
             "first_buy_banner_shown": bool(state.get("first_buy_banner_shown", False)),
@@ -1321,10 +1345,8 @@ def main():
             if now_utc.tzinfo is None:
                 now_utc = now_utc.replace(tzinfo=timezone.utc)
 
-            # Always compute owned_qty from state (fixes your NameError/undefined usage)
             owned_qty = get_owned_qty(state)
 
-            # Always get a position snapshot once per loop (reduces API calls and inconsistency)
             snap = fetch_position_snapshot(SYMBOL)
             pos_qty = float(snap["pos_qty"])
             avg_entry = snap["avg_entry"]
@@ -1333,12 +1355,10 @@ def main():
             market_value = snap["market_value"]
             current_price = snap["current_price"]
 
-            # SELL target based on Alpaca avg entry
-            sell_target = None
-            if int(pos_qty) > 0 and avg_entry is not None and float(SELL_PCT) > 0:
-                sell_target = float(avg_entry) * (1.0 + float(SELL_PCT))
+            # Sell target is based on FIRST BUY ANCHOR (group)
+            anchor = state.get("grid_anchor_price")
+            sell_target = (float(anchor) + float(SELL_RISE_USD)) if (anchor is not None and int(pos_qty) > 0) else None
 
-            # Daily summary should work AFTER CLOSE too (your previous version couldn't run when closed)
             printed_daily = maybe_print_daily_summary_banner(
                 state=state,
                 now_utc=now_utc,
@@ -1347,10 +1367,10 @@ def main():
                 pos_qty=pos_qty,
                 owned_qty=owned_qty,
                 avg_entry=avg_entry,
-                sell_pct=SELL_PCT,
+                sell_rise_usd=SELL_RISE_USD,
                 sell_target=sell_target,
                 buy_count_total=buy_count_total,
-                group_buy_count=group_buy_count,
+                group_buy_count=int(state.get("group_buy_count", 0)),
                 buys_today_et=int(state.get("buys_today_et", 0)),
                 unrealized_pl=unrealized_pl,
                 unrealized_plpc=unrealized_plpc,
@@ -1406,7 +1426,7 @@ def main():
                 state["buys_today_et"] = 0
                 logger.info(f"DAY_ROLLOVER_ET date={today_et} buys_today_et reset to 0")
 
-            # Position change logs (uses snapshot we already have)
+            # Position change logs
             if LOG_POSITION_CHANGES:
                 if last_pos_qty is None:
                     last_pos_qty = pos_qty
@@ -1429,44 +1449,28 @@ def main():
 
             o = float(b.o)
             c = float(b.c)
-            is_red = c < o
 
             # -----------------------------------------
-            # POSITION-AWARE RE-ARM (IMPORTANT FIX)
-            # - In LIVE mode: if Alpaca is flat, clear group memory + owned trackers + banners
-            # - Do NOT zero buys_today_et or buy_count_total here (that would be inaccurate)
-            # - In DRY_RUN: don't use Alpaca flat check (it would constantly reset)
+            # POSITION-AWARE RE-ARM / RESET
             # -----------------------------------------
-            is_flat_confirmed = False
             if DRY_RUN:
                 is_flat_confirmed = (get_owned_qty(state) == 0)
             else:
                 is_flat_confirmed = confirm_flat_position(SYMBOL, checks=2, delay_sec=0.25)
 
             if is_flat_confirmed:
-                if (group_anchor_close is not None) or (last_red_buy_close is not None) or int(state.get("strategy_owned_qty", 0)) != 0:
-                    logger.warning(
-                        "NO_POSITION (confirmed) -> resetting group memory so next red candle can start a new group "
-                        f"(prev_anchor={group_anchor_close}, prev_last_red_buy_close={last_red_buy_close}, "
-                        f"strategy_owned_qty={int(state.get('strategy_owned_qty', 0))})"
-                    )
+                if (
+                    state.get("grid_anchor_price") is not None
+                    or state.get("grid_last_trigger") is not None
+                    or int(state.get("strategy_owned_qty", 0)) != 0
+                ):
+                    logger.warning("NO_POSITION (confirmed) -> resetting GRID group state")
 
-                reset_group_state(state)
-                group_anchor_close = None
-                last_red_buy_close = None
-                group_buy_count = 0
-
-                # keep internal trackers aligned with reality
+                reset_grid_state(state)
                 state["strategy_owned_qty"] = 0
                 if DRY_RUN:
                     state["sim_owned_qty"] = 0
-
-                # reset banners
-                state["first_buy_banner_shown"] = False
-                state["sell_banner_shown"] = False
-                state["sell_arm_banner_shown"] = False
-
-                owned_qty = get_owned_qty(state)  # refresh
+                owned_qty = get_owned_qty(state)
 
             # Profit tracker + heartbeat
             maybe_print_profit_tracker_banner(
@@ -1479,18 +1483,18 @@ def main():
                 unrealized_pl=unrealized_pl,
                 unrealized_plpc=unrealized_plpc,
                 market_value=market_value,
-                sell_pct=SELL_PCT,
+                sell_rise_usd=SELL_RISE_USD,
                 sell_target=sell_target,
                 is_leader=is_leader,
             )
-            
+
             maybe_print_heartbeat(
                 pos_qty=pos_qty,
                 avg_entry=avg_entry,
                 sell_target=sell_target,
                 is_leader=is_leader,
             )
-            
+
             maybe_print_session_snapshot(
                 state=state,
                 now_ts=time.time(),
@@ -1504,23 +1508,27 @@ def main():
             )
 
             logger.info(
-                f"BAR_CLOSE {SYMBOL} t={bar_ts.isoformat()} O={o:.2f} C={c:.2f} red={is_red} "
-                f"group_anchor={group_anchor_close} "
+                f"BAR_CLOSE {SYMBOL} t={bar_ts.isoformat()} O={o:.2f} C={c:.2f} "
+                f"anchor={state.get('grid_anchor_price')} ref={state.get('grid_ref_price')} "
+                f"step={float(state.get('grid_step_usd') or GRID_STEP_START_USD):.2f} "
+                f"tier={int(state.get('grid_tier_count', 0))}/{GRID_TIER_SIZE} "
+                f"next={state.get('grid_next_trigger')} "
                 f"sell_target={(f'{float(sell_target):.2f}' if sell_target is not None else None)} "
-                f"pos_qty={int(pos_qty)} avg_entry={avg_entry} owned_qty={owned_qty} "
-                f"buys_today_et={int(state.get('buys_today_et', 0))} is_leader={is_leader}"
+                f"pos_qty={int(pos_qty)} owned_qty={owned_qty} buys_today_et={int(state.get('buys_today_et', 0))} "
+                f"is_leader={is_leader}"
             )
 
             buys_this_tick = 0
 
-            # SELL ARMING banner (one-time when close approaches sell_target)
-            if SELL_ARM_BANNER and sell_target is not None and int(pos_qty) > 0:
+            # =========================
+            # SELL trigger (anchor + SELL_RISE_USD)
+            # =========================
+            if sell_target is not None and int(pos_qty) > 0:
                 arm_price = float(sell_target) * (1.0 - float(SELL_ARM_PCT))
-                if (not state.get("sell_arm_banner_shown", False)) and float(c) >= arm_price and float(c) < float(sell_target):
+                if SELL_ARM_BANNER and (not state.get("sell_arm_banner_shown", False)) and float(c) >= arm_price and float(c) < float(sell_target):
                     print_sell_arming_banner(
                         symbol=SYMBOL,
                         close_price=float(c),
-                        avg_entry=(float(avg_entry) if avg_entry is not None else None),
                         sell_target=float(sell_target),
                         arm_price=float(arm_price),
                         leader=bool(is_leader),
@@ -1528,11 +1536,7 @@ def main():
                     )
                     state["sell_arm_banner_shown"] = True
 
-            # =========================
-            # SELL trigger (avg_entry-based)
-            # =========================
-            if sell_target is not None:
-                if int(pos_qty) > 0 and (owned_qty > 0 or (not DRY_RUN)) and c >= float(sell_target):
+                if float(c) >= float(sell_target):
                     sell_qty = int(pos_qty) if not DRY_RUN else min(int(pos_qty), int(owned_qty))
 
                     if not state.get("sell_banner_shown", False):
@@ -1540,8 +1544,8 @@ def main():
                             symbol=SYMBOL,
                             sell_qty=int(sell_qty),
                             close_price=float(c),
-                            avg_entry=(float(avg_entry) if avg_entry is not None else None),
-                            sell_target=(float(sell_target) if sell_target is not None else None),
+                            anchor=(float(state.get("grid_anchor_price")) if state.get("grid_anchor_price") is not None else None),
+                            sell_target=float(sell_target),
                             pos_qty_before=float(pos_qty),
                             leader=bool(is_leader),
                             dry_run=bool(DRY_RUN),
@@ -1549,19 +1553,13 @@ def main():
                         state["sell_banner_shown"] = True
 
                     if DRY_RUN:
-                        logger.info(
-                            f"SIM_SELL_OWNED close={c:.2f} avg_entry={(float(avg_entry) if avg_entry else 0.0):.2f} "
-                            f"target={float(sell_target):.2f} sell_qty={sell_qty} owned_qty={owned_qty} pos_qty={int(pos_qty)}"
-                        )
+                        logger.info(f"SIM_SELL close={c:.2f} sell_qty={sell_qty} owned_qty={owned_qty} pos_qty={int(pos_qty)}")
                         set_owned_qty(state, owned_qty - sell_qty)
                     else:
                         if db_conn is not None and not is_leader:
                             logger.warning("STANDBY_BLOCK: skipping SELL (no leader lock)")
                         else:
-                            logger.info(
-                                f"SELL_SIGNAL_OWNED close={c:.2f} avg_entry={float(avg_entry):.2f} "
-                                f"target={float(sell_target):.2f} sell_qty={sell_qty}"
-                            )
+                            logger.info(f"SELL_SIGNAL close={c:.2f} sell_qty={sell_qty} target={float(sell_target):.2f}")
                             order = submit_market_sell(SYMBOL, sell_qty)
                             logger.info(f"ORDER_SUBMITTED id={order.id} qty={sell_qty} side=sell")
                             final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
@@ -1578,144 +1576,156 @@ def main():
                                 pass
                             set_owned_qty(state, owned_qty - dec)
 
-                    logger.info("GROUP_RESET after owned sell")
-                    reset_group_state(state)
-                    group_anchor_close = None
-                    last_red_buy_close = None
-                    group_buy_count = 0
-
-                    state["sell_banner_shown"] = False
-                    state["sell_arm_banner_shown"] = False
-                    state["first_buy_banner_shown"] = False
+                    logger.info("GRID_GROUP_RESET after sell")
+                    reset_grid_state(state)
 
             # =========================
-            # BUY trigger
+            # BUY trigger (Adaptive $-drop grid)
             # =========================
-            if is_red:
-                if last_red_buy_close is None:
-                    should_buy = True
-                    reason = "FIRST_RED_BUY"
-                else:
-                    should_buy = c < float(last_red_buy_close)
-                    reason = "LOWER_THAN_LAST_RED_BUY" if should_buy else "NOT_LOWER_THAN_LAST_RED_BUY"
+            # Blocks first
+            buy_blocked = False
+            if KILL_SWITCH:
+                logger.warning("BUY_BLOCKED KILL_SWITCH active (buys disabled; sells allowed).")
+                buy_blocked = True
 
-                if should_buy and KILL_SWITCH:
-                    logger.warning("BUY_BLOCKED KILL_SWITCH active (buys disabled; sells allowed).")
-                    should_buy = False
+            if (not buy_blocked) and (not in_trade_window_et(now_utc)):
+                logger.info("BUY_BLOCKED outside trade window (ET).")
+                buy_blocked = True
 
-                if should_buy and (not in_trade_window_et(now_utc)):
-                    logger.info("BUY_BLOCKED outside trade window (ET).")
-                    should_buy = False
+            if (not buy_blocked) and (MAX_BUYS_PER_DAY > 0) and (int(state.get("buys_today_et", 0)) >= MAX_BUYS_PER_DAY):
+                logger.warning(f"BUY_BLOCKED max buys per ET day reached: {MAX_BUYS_PER_DAY}")
+                buy_blocked = True
 
-                if should_buy and MAX_BUYS_PER_DAY > 0:
-                    if int(state.get("buys_today_et", 0)) >= MAX_BUYS_PER_DAY:
-                        logger.warning(f"BUY_BLOCKED max buys per ET day reached: {MAX_BUYS_PER_DAY}")
-                        should_buy = False
+            # If we are flat, maintain the trailing reference and next trigger
+            if (not buy_blocked) and int(pos_qty) == 0:
+                grid_init_if_needed(state, float(c))
 
-                if should_buy and MAX_POSITION_QTY > 0:
-                    current_pos = int(pos_qty)
+            # Execute as many triggered buys as allowed (handles fast drops)
+            while (not buy_blocked) and (buys_this_tick < MAX_BUYS_PER_TICK) and grid_should_buy(state, float(c)):
+                # Risk checks per buy (using current close as estimate)
+                if MAX_POSITION_QTY > 0:
+                    current_pos = int(pos_qty) if not DRY_RUN else int(get_owned_qty(state))
                     if current_pos + int(ORDER_QTY) > MAX_POSITION_QTY:
                         logger.warning(
                             f"BUY_BLOCKED would exceed MAX_POSITION_QTY={MAX_POSITION_QTY} "
                             f"(current_pos={current_pos}, order_qty={ORDER_QTY})"
                         )
-                        should_buy = False
+                        break
 
-                if should_buy and MAX_DOLLARS_PER_BUY > 0:
+                if MAX_DOLLARS_PER_BUY > 0:
                     est_cost = float(c) * int(ORDER_QTY)
                     if est_cost > MAX_DOLLARS_PER_BUY:
                         logger.warning(
                             f"BUY_BLOCKED est_cost=${est_cost:.2f} exceeds MAX_DOLLARS_PER_BUY=${MAX_DOLLARS_PER_BUY:.2f}"
                         )
-                        should_buy = False
+                        break
 
-                if should_buy:
-                    if buys_this_tick >= MAX_BUYS_PER_TICK:
-                        logger.warning(f"BUY_LIMIT reached MAX_BUYS_PER_TICK={MAX_BUYS_PER_TICK}")
-                    else:
-                        buy_count_total += 1
-                        group_buy_count += 1
-                        buys_this_tick += 1
+                # Determine the trigger price that is being hit
+                trigger_px = float(state["grid_next_trigger"])
+                buys_this_tick += 1
+                buy_count_total += 1
+                state["group_buy_count"] = int(state.get("group_buy_count", 0)) + 1
 
-                        if group_anchor_close is None:
-                            group_anchor_close = float(c)
-                            logger.info(f"GROUP_ANCHOR_SET group_anchor_close={group_anchor_close:.2f}")
+                # First buy => set anchor (group)
+                first_buy = (state.get("grid_anchor_price") is None)
 
-                        avg_entry_after = avg_entry
+                if DRY_RUN:
+                    logger.info(
+                        f"SIM_BUY total#{buy_count_total} group#{int(state.get('group_buy_count', 0))} "
+                        f"close={c:.2f} trigger={trigger_px:.2f} qty={ORDER_QTY} "
+                        f"step={float(state.get('grid_step_usd')):.2f} tier={int(state.get('grid_tier_count', 0))}/{GRID_TIER_SIZE}"
+                    )
+                    set_owned_qty(state, get_owned_qty(state) + ORDER_QTY)
+                    state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
 
-                        if DRY_RUN:
-                            logger.info(
-                                f"SIM_BUY total#{buy_count_total} group#{group_buy_count} reason={reason} "
-                                f"close={c:.2f} qty={ORDER_QTY}"
-                            )
-                            set_owned_qty(state, get_owned_qty(state) + ORDER_QTY)
-                            state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
-                        else:
-                            if db_conn is not None and not is_leader:
-                                logger.warning("STANDBY_BLOCK: skipping BUY (no leader lock)")
-                            else:
-                                logger.info(
-                                    f"BUY_SIGNAL total#{buy_count_total} group#{group_buy_count} reason={reason} "
-                                    f"close={c:.2f} qty={ORDER_QTY}"
-                                )
-                                order = submit_market_buy(SYMBOL, ORDER_QTY)
-                                logger.info(f"ORDER_SUBMITTED id={order.id} qty={ORDER_QTY} side=buy")
-                                final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
-                                logger.info(
-                                    f"ORDER_FINAL id={order.id} status={(final.status or '').lower()} "
-                                    f"filled_qty={getattr(final,'filled_qty',None)} avg_fill_price={getattr(final,'filled_avg_price',None)}"
-                                )
-                                filled_qty = getattr(final, "filled_qty", None)
-                                inc = ORDER_QTY
-                                try:
-                                    if filled_qty is not None:
-                                        inc = int(float(filled_qty))
-                                except Exception:
-                                    pass
-                                set_owned_qty(state, get_owned_qty(state) + inc)
-                                state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
-
-                                # refresh avg entry after fill
-                                try:
-                                    avg_entry_after = fetch_position_snapshot(SYMBOL)["avg_entry"]
-                                except Exception:
-                                    avg_entry_after = avg_entry
-
-                        last_red_buy_close = float(c)
-                        logger.info(f"RED_BUY_MEMORY_UPDATE last_red_buy_close={last_red_buy_close:.2f}")
-
-                        sell_target_after = None
-                        if avg_entry_after is not None and float(SELL_PCT) > 0:
-                            sell_target_after = float(avg_entry_after) * (1.0 + float(SELL_PCT))
-
-                        if group_buy_count == 1 and not state.get("first_buy_banner_shown", False):
-                            print_first_buy_banner(
-                                live_endpoint=live_endpoint,
-                                is_leader=is_leader,
-                                symbol=SYMBOL,
-                                close=c,
-                                qty=ORDER_QTY,
-                                avg_entry=avg_entry_after,
-                                sell_pct=SELL_PCT,
-                                sell_target=sell_target_after,
-                            )
-                            state["first_buy_banner_shown"] = True
+                    if first_buy:
+                        state["grid_anchor_price"] = trigger_px  # simulation anchor
                 else:
-                    logger.info(f"RED_SKIP reason={reason} close={c:.2f} last_red_buy_close={last_red_buy_close}")
+                    if db_conn is not None and not is_leader:
+                        logger.warning("STANDBY_BLOCK: skipping BUY (no leader lock)")
+                        break
+                    logger.info(
+                        f"BUY_SIGNAL total#{buy_count_total} group#{int(state.get('group_buy_count', 0))} "
+                        f"close={c:.2f} trigger={trigger_px:.2f} qty={ORDER_QTY} "
+                        f"step={float(state.get('grid_step_usd')):.2f} tier={int(state.get('grid_tier_count', 0))}/{GRID_TIER_SIZE}"
+                    )
+                    order = submit_market_buy(SYMBOL, ORDER_QTY)
+                    logger.info(f"ORDER_SUBMITTED id={order.id} qty={ORDER_QTY} side=buy")
+                    final = wait_for_fill(order.id, FILL_TIMEOUT_SEC, FILL_POLL_SEC)
+                    logger.info(
+                        f"ORDER_FINAL id={order.id} status={(final.status or '').lower()} "
+                        f"filled_qty={getattr(final,'filled_qty',None)} avg_fill_price={getattr(final,'filled_avg_price',None)}"
+                    )
+                    filled_qty = getattr(final, "filled_qty", None)
+                    avg_fill = getattr(final, "filled_avg_price", None)
+
+                    inc = ORDER_QTY
+                    try:
+                        if filled_qty is not None:
+                            inc = int(float(filled_qty))
+                    except Exception:
+                        pass
+                    set_owned_qty(state, get_owned_qty(state) + inc)
+                    state["buys_today_et"] = int(state.get("buys_today_et", 0)) + 1
+
+                    # First buy anchor should be based on actual fill price if available
+                    if first_buy:
+                        try:
+                            if avg_fill is not None:
+                                state["grid_anchor_price"] = float(avg_fill)
+                            else:
+                                state["grid_anchor_price"] = trigger_px
+                        except Exception:
+                            state["grid_anchor_price"] = trigger_px
+
+                # After buy, advance the grid ladder
+                grid_advance_after_buy(state)
+
+                # Clear ref price once group has started (we no longer trail)
+                state["grid_ref_price"] = None
+
+                # refresh pos_qty estimate in loop (for MAX_POSITION_QTY logic)
+                if DRY_RUN:
+                    pos_qty = float(get_owned_qty(state))
+                else:
+                    try:
+                        pos_qty = float(fetch_position_snapshot(SYMBOL)["pos_qty"])
+                    except Exception:
+                        pass
+
+                # First buy banner
+                if first_buy and (not state.get("first_buy_banner_shown", False)):
+                    anchor2 = float(state.get("grid_anchor_price") or trigger_px)
+                    sell_target2 = anchor2 + float(SELL_RISE_USD)
+                    print_first_buy_banner(
+                        live_endpoint=live_endpoint,
+                        is_leader=is_leader,
+                        symbol=SYMBOL,
+                        anchor=anchor2,
+                        qty=ORDER_QTY,
+                        sell_target=sell_target2,
+                    )
+                    state["first_buy_banner_shown"] = True
 
             # Persist
             last_bar_ts = bar_ts
             payload = {
                 "last_bar_ts": last_bar_ts.isoformat(),
-                "group_anchor_close": group_anchor_close,
-                "last_red_buy_close": last_red_buy_close,
                 "buy_count_total": buy_count_total,
-                "group_buy_count": group_buy_count,
+                "group_buy_count": int(state.get("group_buy_count", 0)),
                 "strategy_owned_qty": int(state.get("strategy_owned_qty", 0)),
                 "sim_owned_qty": int(state.get("sim_owned_qty", 0)),
                 "buys_today_date_et": state.get("buys_today_date_et"),
                 "buys_today_et": int(state.get("buys_today_et", 0)),
                 "symbol": SYMBOL,
+                # Grid fields
+                "grid_ref_price": state.get("grid_ref_price"),
+                "grid_anchor_price": state.get("grid_anchor_price"),
+                "grid_last_trigger": state.get("grid_last_trigger"),
+                "grid_step_usd": float(state.get("grid_step_usd") or GRID_STEP_START_USD),
+                "grid_tier_count": int(state.get("grid_tier_count", 0)),
+                "grid_next_trigger": state.get("grid_next_trigger"),
+                # Banners
                 "last_profit_banner_ts": float(state.get("last_profit_banner_ts", 0.0)),
                 "last_session_snapshot_ts": float(state.get("last_session_snapshot_ts", 0.0)),
                 "last_daily_summary_date_et": state.get("last_daily_summary_date_et"),
