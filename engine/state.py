@@ -4,11 +4,33 @@ import os
 import time
 from dataclasses import asdict, dataclass
 from typing import Optional
-
+import hashlib
 import psycopg2
 from psycopg2.extras import Json
 
 from grid import GridState
+
+# ----------------------------
+# Leader Lock (Postgres advisory lock)
+# ----------------------------
+
+def _lock_int64_from_key(key: str) -> int:
+    """
+    Convert a string key into a signed 64-bit int for pg_try_advisory_lock
+    """
+    h = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return int(h[:16], 16) - (1 << 63)
+
+
+def try_acquire_leader_lock(conn, lock_key: str) -> bool:
+    """
+    Returns True if this process successfully acquires the leader lock.
+    Other instances will return False and act as standby.
+    """
+    lock_id = _lock_int64_from_key(lock_key)
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s);", (lock_id,))
+        return bool(cur.fetchone()[0])
 
 @dataclass
 class Persisted:
