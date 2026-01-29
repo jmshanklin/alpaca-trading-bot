@@ -85,9 +85,9 @@ def et_date_str(now_utc: datetime) -> str:
 
 def main():
     cfg = load_config()
-    api = tradeapi.REST(cfg.apca_key_id, cfg.apca_secret_key, cfg.apca_base_url)
+    api = tradeapi.REST(cfg.key_id, cfg.secret_key, cfg.base_url)
 
-    live_endpoint = is_live_endpoint(cfg.apca_base_url)
+    live_endpoint = is_live_endpoint(cfg.base_url)
 
     # Live-trading gate: only blocks real-money endpoint when DRY_RUN=false
     if (not cfg.dry_run) and live_endpoint:
@@ -142,7 +142,7 @@ def main():
     logger.warning(f"SYMBOL:      {cfg.symbol}")
     logger.warning(f"DRY_RUN:     {cfg.dry_run}")
     logger.warning(f"KILL_SWITCH: {cfg.kill_switch}")
-    logger.warning(f"ENDPOINT:    {cfg.apca_base_url} ({'LIVE' if live_endpoint else 'PAPER'})")
+    logger.warning(f"ENDPOINT:    {cfg.base_url} ({'LIVE' if live_endpoint else 'PAPER'})")
     logger.warning(f"LEADER:      {is_leader}")
     logger.warning(
         f"GRID:        start={cfg.grid_step_start_usd} inc={cfg.grid_step_increment_usd} "
