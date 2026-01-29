@@ -23,6 +23,9 @@ class Persisted:
 
     # misc
     last_save_ts: float = 0.0
+    
+def db_enabled(database_url: str) -> bool:
+    return bool(database_url and str(database_url).strip())
 
 def _ensure_dir(path: str) -> None:
     d = os.path.dirname(path)
