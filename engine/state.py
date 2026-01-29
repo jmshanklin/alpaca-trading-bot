@@ -2,79 +2,27 @@
 import json
 import os
 import time
-from dataclasses import asdict, dataclass
-from typing import Optional
 import hashlib
+from typing import Any, Dict, Optional
+
 import psycopg2
 from psycopg2.extras import Json
 
-from grid import GridState
 
 # ----------------------------
-# Leader Lock (Postgres advisory lock)
+# DB enable + connect
 # ----------------------------
-
-def _lock_int64_from_key(key: str) -> int:
-    """
-    Convert a string key into a signed 64-bit int for pg_try_advisory_lock
-    """
-    h = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return int(h[:16], 16) - (1 << 63)
-
-
-def try_acquire_leader_lock(conn, lock_key: str) -> bool:
-    """
-    Returns True if this process successfully acquires the leader lock.
-    Other instances will return False and act as standby.
-    """
-    lock_id = _lock_int64_from_key(lock_key)
-    with conn.cursor() as cur:
-        cur.execute("SELECT pg_try_advisory_lock(%s);", (lock_id,))
-        return bool(cur.fetchone()[0])
-
-@dataclass
-class Persisted:
-    # day counters
-    buys_today_date_et: Optional[str] = None
-    buys_today_et: int = 0
-
-    # grid state
-    grid_anchor_price: Optional[float] = None
-    grid_last_buy_price: Optional[float] = None
-    grid_buy_count_in_group: int = 0
-
-    # misc
-    last_save_ts: float = 0.0
-    
 def db_enabled(database_url: str) -> bool:
     return bool(database_url and str(database_url).strip())
 
-def _ensure_dir(path: str) -> None:
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-
-def load_disk(path: str) -> Persisted:
-    try:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                obj = json.load(f) or {}
-            return Persisted(**obj)
-    except Exception:
-        pass
-    return Persisted()
-
-def save_disk(path: str, p: Persisted) -> None:
-    _ensure_dir(path)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(asdict(p), f, indent=2, sort_keys=True)
 
 def db_connect(database_url: str):
     conn = psycopg2.connect(database_url, connect_timeout=10)
     conn.autocommit = True
     return conn
 
-def db_init(conn):
+
+def db_init(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -86,17 +34,38 @@ def db_init(conn):
             """
         )
 
-def load_db(conn, state_id: str) -> Persisted:
+
+# ----------------------------
+# Leader Lock (Postgres advisory lock)
+# ----------------------------
+def _lock_int64_from_key(key: str) -> int:
+    """
+    Convert a string key into a signed 64-bit int for pg_try_advisory_lock.
+    """
+    h = hashlib.sha256(key.encode("utf-8")).digest()
+    # Use first 8 bytes, then force into signed 63-bit range (portable)
+    val = int.from_bytes(h[:8], "big", signed=False) % (2**63 - 1)
+    return int(val)
+
+
+def try_acquire_leader_lock(conn, lock_key: str) -> bool:
+    lock_id = _lock_int64_from_key(lock_key)
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s);", (lock_id,))
+        return bool(cur.fetchone()[0])
+
+
+# ----------------------------
+# DB state read/write
+# ----------------------------
+def load_state_db(conn, state_id: str) -> Dict[str, Any]:
     with conn.cursor() as cur:
         cur.execute("SELECT state FROM engine_state WHERE id=%s;", (state_id,))
         row = cur.fetchone()
-        data = (row[0] or {}) if row else {}
-        try:
-            return Persisted(**data)
-        except Exception:
-            return Persisted()
+        return (row[0] or {}) if row else {}
 
-def save_db(conn, state_id: str, p: Persisted) -> None:
+
+def save_state_db(conn, state_id: str, state: Dict[str, Any]) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -105,25 +74,29 @@ def save_db(conn, state_id: str, p: Persisted) -> None:
             ON CONFLICT (id)
             DO UPDATE SET state = EXCLUDED.state, updated_at = now();
             """,
-            (state_id, Json(asdict(p))),
+            (state_id, Json(state)),
         )
 
-def hydrate_grid(p: Persisted) -> GridState:
-    return GridState(
-        anchor_price=p.grid_anchor_price,
-        last_buy_price=p.grid_last_buy_price,
-        buy_count_in_group=int(p.grid_buy_count_in_group or 0),
-    )
 
-def dehydrate_grid(p: Persisted, gs: GridState) -> None:
-    p.grid_anchor_price = gs.anchor_price
-    p.grid_last_buy_price = gs.last_buy_price
-    p.grid_buy_count_in_group = int(gs.buy_count_in_group or 0)
+# ----------------------------
+# Disk fallback state read/write
+# ----------------------------
+def load_state_disk(state_path: str) -> Dict[str, Any]:
+    try:
+        if state_path and os.path.exists(state_path):
+            with open(state_path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+    except Exception:
+        pass
+    return {}
 
-def should_save(p: Persisted, every_sec: float) -> bool:
-    if every_sec <= 0:
-        return True
-    return (time.time() - float(p.last_save_ts or 0.0)) >= float(every_sec)
 
-def mark_saved(p: Persisted) -> None:
-    p.last_save_ts = time.time()
+def save_state_disk(state_path: str, state: Dict[str, Any]) -> None:
+    try:
+        if not state_path:
+            return
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+    except Exception:
+        pass
