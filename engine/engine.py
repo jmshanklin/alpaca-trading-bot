@@ -109,6 +109,7 @@ def main():
         else:
             is_leader = try_acquire_leader_lock(conn, cfg.leader_lock_key)
             logger.info("LEADER_LOCK acquired -> ACTIVE" if is_leader else "LEADER_LOCK not acquired -> STANDBY")
+            logger.warning(f"LEADER_FINAL_AT_STARTUP: {is_leader}")
     else:
         logger.warning("DATABASE_URL not set -> using DISK state (single instance only)")
 
@@ -160,6 +161,7 @@ def main():
                     time.sleep(cfg.standby_poll_sec)
                     continue
                 logger.info("LEADER_LOCK acquired -> ACTIVE")
+                logger.warning(f"LEADER_NOW: {is_leader}")
 
             clock = api.get_clock()
             market_is_open = bool(clock.is_open)
