@@ -18,7 +18,16 @@ def check_buy_allowed(
     max_dollars_per_buy: float,
     current_pos_qty: int,
     max_position_qty: int,
+
+    # Added to match engine call (currently not used by this function)
+    now_utc=None,
+    trade_start_et=None,
+    trade_end_et=None,
+
+    # Allows adding new fields in engine without crashing risk gate
+    **kwargs,
 ) -> RiskDecision:
+
     if kill_switch:
         return RiskDecision(False, "KILL_SWITCH")
 
