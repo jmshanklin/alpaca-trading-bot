@@ -507,7 +507,7 @@ def main():
                             gs=gs,
                             order_id=getattr(order, "id", None),
                             client_order_id=client_order_id,
-                            note="LIVE sell submitted",
+                            note="ORDER_SUBMITTED sell",
                         )
                         # Reset immediately to prevent any accidental re-sell behavior if Alpaca lags
                         reset_group(gs)
@@ -550,6 +550,22 @@ def main():
 
                 if not decision.ok:
                     logger.info(f"BUY_BLOCKED reason={decision.reason}")
+                
+                    journal_trade(
+                        conn=conn,
+                        symbol=cfg.symbol,
+                        side="BUY",
+                        qty=int(cfg.order_qty),
+                        est_price=price,
+                        is_dry_run=bool(cfg.dry_run),
+                        is_leader=bool(is_leader),
+                        group_id=group_id,
+                        gs=gs,
+                        order_id=None,
+                        client_order_id=None,
+                        note=f"BUY_BLOCKED: {decision.reason}",
+                    )
+                
                     break
 
                 # Standby protection (belt-and-suspenders)
@@ -607,7 +623,7 @@ def main():
                         gs=gs,
                         order_id=getattr(order, "id", None),
                         client_order_id=client_order_id,
-                        note="LIVE buy submitted",
+                        note="ORDER_SUBMITTED buy",
                     )
                     # Optimistic fill at current price (simple); can be upgraded to actual fill price later
                     on_buy_filled(fill_price=price, gs=gs)
