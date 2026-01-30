@@ -128,7 +128,6 @@ def get_last_price(api: tradeapi.REST, symbol: str) -> Optional[float]:
 
     return None
 
-
 def journal_trade(
     *,
     conn,
@@ -151,6 +150,12 @@ def journal_trade(
     if conn is None:
         return
 
+    # Normalize to match DB constraint: ('BUY','SELL')
+    side_norm = (side or "").strip().upper()
+    if side_norm not in ("BUY", "SELL"):
+        logger.warning(f"TRADE_JOURNAL_BAD_SIDE: {side!r}")
+        return
+
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -165,7 +170,7 @@ def journal_trade(
                 """,
                 (
                     symbol,
-                    side,
+                    side_norm,  # <-- CHANGED
                     int(qty),
                     float(est_price) if est_price is not None else None,
                     order_id,
@@ -179,14 +184,12 @@ def journal_trade(
                     note,
                 ),
             )
-        # Commit explicitly (some setups are not autocommit)
         try:
             conn.commit()
         except Exception:
             pass
     except Exception as e:
         logger.warning(f"TRADE_JOURNAL_WRITE_FAILED: {e}")
-
 
 def et_date_str(now_utc: datetime) -> str:
     """
@@ -586,7 +589,7 @@ def main():
                     # Optimistic fill at current price (simple); can be upgraded to actual fill price later
                     on_buy_filled(fill_price=price, gs=gs)
                     pos_qty = int(pos_qty) + int(cfg.order_qty)
-
+                    
             # --- Persist state ---
             state["buy_count_total"] = int(buy_count_total)
             state["buys_today_et"] = int(buys_today)
