@@ -100,3 +100,57 @@ def save_state_disk(state_path: str, state: Dict[str, Any]) -> None:
             json.dump(state, f, indent=2, sort_keys=True)
     except Exception:
         pass
+
+def journal_event(
+    conn,
+    *,
+    symbol: str,
+    side: str,
+    qty: int,
+    est_price: float | None,
+    order_id: str | None = None,
+    client_order_id: str | None = None,
+    is_dry_run: bool = True,
+    is_leader: bool = False,
+    group_id: str | None = None,
+    anchor_price: float | None = None,
+    last_buy_price: float | None = None,
+    buys_in_group: int | None = None,
+    note: str | None = None,
+) -> None:
+    """
+    Append one row to trade_journal. Safe no-op if conn is None.
+    """
+    if conn is None:
+        return
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO trade_journal
+            (symbol, side, qty, est_price, order_id, client_order_id,
+             is_dry_run, is_leader, group_id, anchor_price, last_buy_price,
+             buys_in_group, note)
+        VALUES
+            (%s, %s, %s, %s, %s, %s,
+             %s, %s, %s, %s, %s,
+             %s, %s)
+        """,
+        (
+            symbol,
+            side,
+            int(qty),
+            est_price,
+            order_id,
+            client_order_id,
+            bool(is_dry_run),
+            bool(is_leader),
+            group_id,
+            anchor_price,
+            last_buy_price,
+            buys_in_group,
+            note,
+        ),
+    )
+    conn.commit()
+    cur.close()
