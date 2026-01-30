@@ -107,15 +107,15 @@ def journal_event(
     symbol: str,
     side: str,
     qty: int,
-    est_price: float | None,
+    est_price,
     order_id: str | None = None,
     client_order_id: str | None = None,
     is_dry_run: bool = True,
     is_leader: bool = False,
     group_id: str | None = None,
-    anchor_price: float | None = None,
-    last_buy_price: float | None = None,
-    buys_in_group: int | None = None,
+    anchor_price=None,
+    last_buy_price=None,
+    buys_in_group=None,
     note: str | None = None,
 ) -> None:
     """
@@ -154,3 +154,4 @@ def journal_event(
     )
     conn.commit()
     cur.close()
+
