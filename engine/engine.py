@@ -514,17 +514,20 @@ def main():
                 # Risk gate
                 decision = check_buy_allowed(
                     kill_switch=cfg.kill_switch,
+                    buys_this_tick=buys_this_tick,
+                    max_buys_per_tick=cfg.max_buys_per_tick,
+                    buys_today=buys_today,
+                    max_buys_per_day=cfg.max_buys_per_day,
+                    order_qty=cfg.order_qty,
+                    est_price=price,
+                    max_dollars_per_buy=cfg.max_dollars_per_buy,
+                    current_pos_qty=max(0, int(pos_qty)),
+                    max_position_qty=cfg.max_position_qty,
                     now_utc=now_utc,
                     trade_start_et=cfg.trade_start_et,
                     trade_end_et=cfg.trade_end_et,
-                    buys_today=buys_today,
-                    max_buys_per_day=cfg.max_buys_per_day,
-                    current_pos_qty=max(0, int(pos_qty)),
-                    order_qty=cfg.order_qty,
-                    max_position_qty=cfg.max_position_qty,
-                    est_price=price,
-                    max_dollars_per_buy=cfg.max_dollars_per_buy,
                 )
+
                 if not decision.ok:
                     logger.info(f"BUY_BLOCKED reason={decision.reason}")
                     break
