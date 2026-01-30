@@ -149,6 +149,11 @@ def journal_trade(
     """
     if conn is None:
         return
+        
+    logger.warning(
+        f"JOURNAL_CALL symbol={symbol} side={side} qty={qty} est_price={est_price} "
+        f"is_dry_run={is_dry_run} is_leader={is_leader} group_id={group_id} note={note!r}"
+    )
 
     # Normalize to match DB constraint: ('BUY','SELL')
     side_norm = (side or "").strip().upper()
