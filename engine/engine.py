@@ -441,6 +441,20 @@ def main():
                     unrealized_pl=unrealized_pl,
                     gs=gs,
                 )
+                journal_trade(
+                    conn=conn,
+                    symbol=cfg.symbol,
+                    side="BUY",
+                    qty=1,
+                    est_price=price,
+                    is_dry_run=True,
+                    is_leader=is_leader,
+                    group_id=group_id,
+                    gs=gs,
+                    order_id=None,
+                    client_order_id=None,
+                    note="EVENT: HEARTBEAT_DB_PROBE",
+                )
                 last_heartbeat_ts = now_ts
 
             # If market closed, just idle (no trades)
