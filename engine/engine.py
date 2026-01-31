@@ -28,8 +28,7 @@ from state import (
     save_state_disk,
 )
 BOOT_SIGNATURE = "ENGINE_1.30.0_BOOT_SIG_2026-01-30_C"
-
-logger.warning(f"BOOT_SIGNATURE: {BOOT_SIGNATURE}")
+print(f"BOOT_SIGNATURE: {BOOT_SIGNATURE}", flush=True)
 
 # ----------------------------
 # Helpers
