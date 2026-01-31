@@ -8,6 +8,9 @@ import uuid
 import alpaca_trade_api as tradeapi
 
 from logging_ct import build_logger
+# ---- logger must exist before main() runs ----
+logger = build_logger("engine")
+
 from config import load_config
 from risk import check_buy_allowed
 from grid import (
