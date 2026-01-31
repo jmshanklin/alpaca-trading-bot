@@ -1,4 +1,5 @@
 # engine/engine.py
+# Engine v1.30.x — Render-safe startup, logger defined early, CT timestamp tagging in DB notes
 import time
 from datetime import datetime, timezone
 from typing import Optional, Tuple
@@ -27,28 +28,58 @@ from state import (
     load_state_disk,
     save_state_disk,
 )
+
+# ----------------------------
+# Logger must exist BEFORE any logger.* calls
+# ----------------------------
+logger = build_logger("engine")
+
+# ----------------------------
+# Boot signature (prints immediately even if logger breaks later)
+# ----------------------------
 BOOT_SIGNATURE = "ENGINE_1.30.0_BOOT_SIG_2026-01-30_C"
 print(f"BOOT_SIGNATURE: {BOOT_SIGNATURE}", flush=True)
+logger.warning(f"BOOT_SIGNATURE: {BOOT_SIGNATURE}")
+
+# ----------------------------
+# Time helpers
+# ----------------------------
+def ct_now_str(now_utc: Optional[datetime] = None) -> str:
+    """
+    Return a Central Time timestamp string.
+    We keep DB ts_utc as UTC (best practice), but we TAG notes with CT so you never have to convert.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo  # py3.9+
+        ct = now_utc.astimezone(ZoneInfo("America/Chicago"))
+        return ct.strftime("%Y-%m-%d %H:%M:%S CT")
+    except Exception:
+        # Fallback if ZoneInfo missing for any reason
+        return now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def et_date_str(now_utc: datetime) -> str:
+    """
+    ET rollover key for "buys_today".
+    """
+    try:
+        from zoneinfo import ZoneInfo  # py3.9+
+        et = now_utc.astimezone(ZoneInfo("America/New_York"))
+        return et.date().isoformat()
+    except Exception:
+        return now_utc.date().isoformat()
+
 
 # ----------------------------
 # Helpers
 # ----------------------------
 def is_live_endpoint(url: str) -> bool:
     u = (url or "").lower()
-    # Alpaca paper endpoint typically contains "paper-api"
     if "paper-api" in u:
         return False
     return "api.alpaca.markets" in u
-
-
-def get_position_qty(api: tradeapi.REST, symbol: str) -> int:
-    try:
-        pos = api.get_position(symbol)
-        return int(float(pos.qty))
-    except Exception as e:
-        if "position does not exist" in str(e).lower():
-            return 0
-        raise
 
 
 def get_position_details(
@@ -127,6 +158,19 @@ def get_last_price(api: tradeapi.REST, symbol: str) -> Optional[float]:
 
     return None
 
+
+def fmt_money(x: Optional[float]) -> str:
+    if x is None:
+        return "None"
+    return f"{x:,.2f}"
+
+
+def fmt_num(x: Optional[float]) -> str:
+    if x is None:
+        return "None"
+    return f"{x:.2f}"
+
+
 def journal_trade(
     *,
     conn,
@@ -145,20 +189,22 @@ def journal_trade(
     """
     Writes one row to public.trade_journal.
     If conn is None, does nothing (disk-state mode).
+
+    IMPORTANT:
+    - DB column is ts_utc (UTC) — we keep it.
+    - To avoid you ever converting times, we prefix every note with CT timestamp.
     """
     if conn is None:
         return
-        
-    logger.warning(
-        f"JOURNAL_CALL symbol={symbol} side={side} qty={qty} est_price={est_price} "
-        f"is_dry_run={is_dry_run} is_leader={is_leader} group_id={group_id} note={note!r}"
-    )
 
     # Normalize to match DB constraint: ('BUY','SELL')
     side_norm = (side or "").strip().upper()
     if side_norm not in ("BUY", "SELL"):
         logger.warning(f"TRADE_JOURNAL_BAD_SIDE: {side!r}")
         return
+
+    ct_tag = ct_now_str(datetime.now(timezone.utc))
+    note_tagged = f"[{ct_tag}] {note}".strip()
 
     try:
         with conn.cursor() as cur:
@@ -174,7 +220,7 @@ def journal_trade(
                 """,
                 (
                     symbol,
-                    side_norm,  # <-- CHANGED
+                    side_norm,
                     int(qty),
                     float(est_price) if est_price is not None else None,
                     order_id,
@@ -185,7 +231,7 @@ def journal_trade(
                     float(gs.anchor_price) if gs.anchor_price is not None else None,
                     float(gs.last_buy_price) if gs.last_buy_price is not None else None,
                     int(gs.buy_count_in_group),
-                    note,
+                    note_tagged,
                 ),
             )
         try:
@@ -194,31 +240,6 @@ def journal_trade(
             pass
     except Exception as e:
         logger.warning(f"TRADE_JOURNAL_WRITE_FAILED: {e}")
-
-def et_date_str(now_utc: datetime) -> str:
-    """
-    ET rollover key for "buys_today".
-    """
-    try:
-        from zoneinfo import ZoneInfo  # py3.9+
-
-        et = now_utc.astimezone(ZoneInfo("America/New_York"))
-        return et.date().isoformat()
-    except Exception:
-        # fallback: stable, but not true ET
-        return now_utc.date().isoformat()
-
-
-def fmt_money(x: Optional[float]) -> str:
-    if x is None:
-        return "None"
-    return f"{x:,.2f}"
-
-
-def fmt_num(x: Optional[float]) -> str:
-    if x is None:
-        return "None"
-    return f"{x:.2f}"
 
 
 def heartbeat_banner(
@@ -244,6 +265,7 @@ def heartbeat_banner(
 
     logger.warning("")
     logger.warning("💗 HEARTBEAT")
+    logger.warning(f"TIME_CT:    {ct_now_str(datetime.now(timezone.utc))}")
     logger.warning("----------------------------------------------")
     logger.warning(f"MODE:        {'LIVE' if (not cfg.dry_run and live_endpoint) else 'PAPER/DRY'}")
     logger.warning(f"SYMBOL:      {cfg.symbol}")
@@ -287,7 +309,6 @@ def safe_get_clock(api: tradeapi.REST, retries: int = 3, sleep_sec: float = 1.0)
 def main():
     cfg = load_config()
     api = tradeapi.REST(cfg.key_id, cfg.secret_key, cfg.base_url)
-
     live_endpoint = is_live_endpoint(cfg.base_url)
 
     # Live-trading gate: only blocks real-money endpoint when DRY_RUN=false
@@ -353,7 +374,7 @@ def main():
         else:
             save_state_disk(cfg.state_path, state)
 
-    # Grid state (simple GridState)
+    # Grid state
     gs = GridState(
         anchor_price=state.get("grid_anchor_price"),
         last_buy_price=state.get("grid_last_buy_price") or state.get("grid_last_trigger"),  # legacy fallback
@@ -364,6 +385,7 @@ def main():
     logger.warning("==============================================")
     logger.warning("🚀 ENGINE START")
     logger.warning("----------------------------------------------")
+    logger.warning(f"TIME_CT:       {ct_now_str(datetime.now(timezone.utc))}")
     logger.warning(f"SYMBOL:        {cfg.symbol}")
     logger.warning(f"DRY_RUN:       {cfg.dry_run}")
     logger.warning(f"KILL_SWITCH:   {cfg.kill_switch}")
@@ -420,11 +442,10 @@ def main():
                 gs.anchor_price is not None or gs.last_buy_price is not None or gs.buy_count_in_group > 0
             ):
                 reset_group(gs)
-                # new group for the next cycle
                 group_id = str(uuid.uuid4())
                 state["group_id"] = group_id
 
-            # HEARTBEAT banner (prints every X seconds)
+            # HEARTBEAT banner
             now_ts = time.time()
             if (now_ts - last_heartbeat_ts) >= heartbeat_sec:
                 heartbeat_banner(
@@ -439,10 +460,9 @@ def main():
                     unrealized_pl=unrealized_pl,
                     gs=gs,
                 )
-                
                 last_heartbeat_ts = now_ts
 
-            # If market closed, just idle (no trades)
+            # If market closed, just idle
             if not market_is_open:
                 logger.info("MARKET_CLOSED waiting...")
                 time.sleep(market_closed_sleep_sec)
@@ -450,6 +470,7 @@ def main():
 
             # --- SELL logic ---
             if pos_qty > 0 and should_sell_now(price=price, gs=gs, sell_rise_usd=cfg.sell_rise_usd):
+                # Belt-and-suspenders: only meaningful when DB/leader mode is enabled
                 if (not cfg.dry_run) and (conn is not None) and (not is_leader):
                     logger.warning("STANDBY_BLOCK: skipping SELL (no leader lock)")
                 else:
@@ -465,7 +486,7 @@ def main():
                         journal_trade(
                             conn=conn,
                             symbol=cfg.symbol,
-                            side="sell",
+                            side="SELL",
                             qty=sell_qty,
                             est_price=price,
                             is_dry_run=True,
@@ -483,7 +504,7 @@ def main():
                         journal_trade(
                             conn=conn,
                             symbol=cfg.symbol,
-                            side="sell",
+                            side="SELL",
                             qty=sell_qty,
                             est_price=price,
                             is_dry_run=False,
@@ -494,7 +515,6 @@ def main():
                             client_order_id=client_order_id,
                             note="ORDER_SUBMITTED sell",
                         )
-                        # Reset immediately to prevent any accidental re-sell behavior if Alpaca lags
                         reset_group(gs)
                         pos_qty = 0
 
@@ -535,7 +555,7 @@ def main():
 
                 if not decision.ok:
                     logger.info(f"BUY_BLOCKED reason={decision.reason}")
-                
+
                     journal_trade(
                         conn=conn,
                         symbol=cfg.symbol,
@@ -550,10 +570,9 @@ def main():
                         client_order_id=None,
                         note=f"BUY_BLOCKED: {decision.reason}",
                     )
-                
                     break
 
-                # Standby protection (belt-and-suspenders)
+                # Standby protection (only relevant when DB/leader mode is enabled)
                 if (not cfg.dry_run) and (conn is not None) and (not is_leader):
                     logger.warning("STANDBY_BLOCK: skipping BUY (no leader lock)")
                     break
@@ -581,7 +600,7 @@ def main():
                     journal_trade(
                         conn=conn,
                         symbol=cfg.symbol,
-                        side="buy",
+                        side="BUY",
                         qty=int(cfg.order_qty),
                         est_price=price,
                         is_dry_run=True,
@@ -599,7 +618,7 @@ def main():
                     journal_trade(
                         conn=conn,
                         symbol=cfg.symbol,
-                        side="buy",
+                        side="BUY",
                         qty=int(cfg.order_qty),
                         est_price=price,
                         is_dry_run=False,
@@ -610,10 +629,9 @@ def main():
                         client_order_id=client_order_id,
                         note="ORDER_SUBMITTED buy",
                     )
-                    # Optimistic fill at current price (simple); can be upgraded to actual fill price later
                     on_buy_filled(fill_price=price, gs=gs)
                     pos_qty = int(pos_qty) + int(cfg.order_qty)
-                    
+
             # --- Persist state ---
             state["buy_count_total"] = int(buy_count_total)
             state["buys_today_et"] = int(buys_today)
