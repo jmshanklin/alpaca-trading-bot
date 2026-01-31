@@ -29,7 +29,7 @@ from state import (
 )
 
 logger = build_logger("engine")
-BOOT_SIGNATURE = "ENGINE_BOOT_SIG_A"
+BOOT_SIGNATURE = "ENGINE_1.30.0_BOOT_SIG_2026-01-30_B"
 logger.warning(f"BOOT_SIGNATURE: {BOOT_SIGNATURE}")
 
 # ----------------------------
