@@ -8,7 +8,7 @@ CT = ZoneInfo("America/Chicago")
 class CTFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=CT)
-        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+        return dt.strftime(datefmt or "%m/%d/%Y %I:%M:%S %p")
 
 def build_logger(name: str = "engine") -> logging.Logger:
     logger = logging.getLogger(name)
