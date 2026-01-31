@@ -60,8 +60,7 @@ def ct_now_str(now_utc: Optional[datetime] = None) -> str:
         return ct.strftime("%Y-%m-%d %H:%M:%S CT")
     except Exception:
         # Fallback if ZoneInfo missing for any reason
-        return now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-
+        return now_utc.strftime("%Y-%m-%d %I:%M:%S %p UTC")
 
 def et_date_str(now_utc: datetime) -> str:
     """
