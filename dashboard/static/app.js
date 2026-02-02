@@ -183,12 +183,22 @@ const chart = LightweightCharts.createChart(chartEl, {
   timeScale: {
     timeVisible: true,
     secondsVisible: false,
-    rightOffset: 30,
+  
+    // Default right padding (in bars)
+    rightOffset: 12,
+  
+    // Make candles less cramped overall
+    barSpacing: 8,
+  
     borderVisible: true,
     ticksVisible: true,
-    fixRightEdge: true,
-    lockVisibleTimeRangeOnResize: true,
-  },
+  
+    // ✅ Important: don't hard-lock to the right edge
+    fixRightEdge: false,
+  
+    // Resize shouldn’t “re-pin” the last bar
+    lockVisibleTimeRangeOnResize: false,
+  }, 
   crosshair: {
     mode: 1,
     vertLine: {
@@ -237,6 +247,68 @@ toggleBtn.title = "Toggle History Mode (loads more 1-min bars)";
 
 // Put it next to your status line
 statusEl.parentElement.appendChild(toggleBtn);
+
+// ----------------------------
+// UI: Right-padding controls (pull candles away from price scale)
+// ----------------------------
+let RIGHT_PAD = 12;
+
+function applyRightPad() {
+  chart.timeScale().applyOptions({ rightOffset: RIGHT_PAD });
+}
+
+// Create buttons
+const padMinusBtn = document.createElement("button");
+padMinusBtn.textContent = "Pad −";
+padMinusBtn.style.marginLeft = "8px";
+padMinusBtn.style.padding = "6px 10px";
+padMinusBtn.style.borderRadius = "8px";
+padMinusBtn.style.border = "1px solid #1f2430";
+padMinusBtn.style.background = "#0e1117";
+padMinusBtn.style.color = "#d1d4dc";
+padMinusBtn.style.cursor = "pointer";
+padMinusBtn.title = "Decrease right padding (move candles closer)";
+
+const padPlusBtn = document.createElement("button");
+padPlusBtn.textContent = "Pad +";
+padPlusBtn.style.marginLeft = "6px";
+padPlusBtn.style.padding = "6px 10px";
+padPlusBtn.style.borderRadius = "8px";
+padPlusBtn.style.border = "1px solid #1f2430";
+padPlusBtn.style.background = "#0e1117";
+padPlusBtn.style.color = "#d1d4dc";
+padPlusBtn.style.cursor = "pointer";
+padPlusBtn.title = "Increase right padding (pull candles left)";
+
+// Attach to topbar
+statusEl.parentElement.appendChild(padMinusBtn);
+statusEl.parentElement.appendChild(padPlusBtn);
+
+// Button behavior
+padMinusBtn.onclick = () => {
+  RIGHT_PAD = Math.max(0, RIGHT_PAD - 2);
+  applyRightPad();
+};
+
+padPlusBtn.onclick = () => {
+  RIGHT_PAD = Math.min(80, RIGHT_PAD + 2);
+  applyRightPad();
+};
+
+// Keyboard shortcuts: [ = less pad, ] = more pad
+window.addEventListener("keydown", (e) => {
+  if (e.key === "[") {
+    RIGHT_PAD = Math.max(0, RIGHT_PAD - 2);
+    applyRightPad();
+  }
+  if (e.key === "]") {
+    RIGHT_PAD = Math.min(80, RIGHT_PAD + 2);
+    applyRightPad();
+  }
+});
+
+// Apply initial pad
+applyRightPad();
 
 toggleBtn.onclick = async () => {
   HISTORY_MODE = !HISTORY_MODE;
@@ -488,6 +560,7 @@ async function loadHistory(refit = false) {
     // IMPORTANT: only refit when you explicitly ask (toggle / first load)
     if (refit) {
       chart.timeScale().fitContent();
+      applyRightPad(); // ✅ keep right padding after refit
     }
 
     // last bar
