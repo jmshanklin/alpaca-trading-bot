@@ -84,57 +84,83 @@ function fmtPct(x) {
 }
 
 async function loadGroupPerformance() {
-  const el = document.getElementById("groupTable");
-  if (!el) return;
+  const gpEl = document.getElementById("gp");
+  const tableEl = document.getElementById("groupTable");
+  if (!gpEl || !tableEl) return;
 
   try {
     const r = await fetch("/group_performance");
     const j = await r.json();
 
-    if (!j || j.ok !== true) {
-      el.textContent = "Group Performance: (no data / error)";
+    if (!j || j.ok === false) {
+      gpEl.textContent = "GP: (error)";
+      tableEl.textContent = JSON.stringify(j, null, 2);
       return;
     }
 
-    const rows = j.rows || [];
+    // j.rows should be an array of cycles (one row per group_id)
+    const rows = Array.isArray(j.rows) ? j.rows : [];
 
-    let html = "";
-    html += "GROUP PERFORMANCE (TSLA cycles)\n";
-    html += "-----------------------------------------------\n";
+    // --- top-bar mini summary (OPEN/CLOSED counts + last pnl)
+    const openCount = rows.filter(x => (x.cycle_status || "").toUpperCase() === "OPEN").length;
+    const closedCount = rows.filter(x => (x.cycle_status || "").toUpperCase() === "CLOSED").length;
 
-    if (rows.length === 0) {
-      html += "(no rows)\n";
-      el.textContent = html;
+    // pick most recent row by cycle_last_ct if available, else first row
+    const last = rows[0] || null;
+    const lastPnl = last && typeof last.pnl === "number" ? last.pnl : null;
+    const lastPct = last && typeof last.pnl_pct === "number" ? last.pnl_pct : null;
+
+    gpEl.textContent =
+      `GP: OPEN ${openCount} | CLOSED ${closedCount}` +
+      (lastPnl !== null ? ` | Last PnL ${lastPnl.toFixed(2)}` : "") +
+      (lastPct !== null ? ` (${lastPct.toFixed(2)}%)` : "");
+
+    // --- table area: show a compact text table
+    if (!rows.length) {
+      tableEl.textContent = "No group rows yet.";
       return;
     }
 
-    // Build a fixed-width text table (monospace)
-    const header =
-      ["cycle_start_ct","cycle_last_ct","buy_qty","avg_buy","sell_qty","avg_sell","pnl","pnl_pct","status","result"]
-      .join(" | ");
+    // Build monospace “table”
+    const header = [
+      "cycle_status",
+      "win_loss",
+      "cycle_start_ct",
+      "cycle_last_ct",
+      "buy_qty",
+      "avg_buy_price",
+      "sell_qty",
+      "avg_sell_price",
+      "pnl",
+      "pnl_pct",
+      "group_id"
+    ];
 
-    html += header + "\n";
-    html += "-".repeat(header.length) + "\n";
+    const lines = [];
+    lines.push(header.join(" | "));
+    lines.push("-".repeat(140));
 
-    for (const r of rows) {
-      html += [
-        r.cycle_start_ct || "",
-        r.cycle_last_ct || "",
-        fmtNum(r.buy_qty),
-        fmtNum(r.avg_buy_price),
-        fmtNum(r.sell_qty),
-        fmtNum(r.avg_sell_price),
-        fmtNum(r.pnl),
-        fmtPct(r.pnl_pct),
-        r.cycle_status || "",
-        r.win_loss || "",
-      ].join(" | ") + "\n";
+    for (const x of rows.slice(0, 25)) {
+      const line = [
+        (x.cycle_status ?? ""),
+        (x.win_loss ?? ""),
+        (x.cycle_start_ct ?? ""),
+        (x.cycle_last_ct ?? ""),
+        (x.buy_qty ?? ""),
+        (x.avg_buy_price ?? ""),
+        (x.sell_qty ?? ""),
+        (x.avg_sell_price ?? ""),
+        (typeof x.pnl === "number" ? x.pnl.toFixed(2) : (x.pnl ?? "")),
+        (typeof x.pnl_pct === "number" ? x.pnl_pct.toFixed(2) : (x.pnl_pct ?? "")),
+        (x.group_id ?? "")
+      ].join(" | ");
+      lines.push(line);
     }
 
-    el.textContent = html;
+    tableEl.textContent = lines.join("\n");
   } catch (e) {
-    const el2 = document.getElementById("groupTable");
-    if (el2) el2.textContent = "Group Performance: fetch failed";
+    gpEl.textContent = "GP: (exception)";
+    tableEl.textContent = String(e);
   }
 }
 
