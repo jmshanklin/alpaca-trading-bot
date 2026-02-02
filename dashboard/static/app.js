@@ -69,6 +69,75 @@ function minuteFloor(tsSec) {
   return Math.floor(tsSec / 60) * 60;
 }
 
+function fmtNum(x) {
+  if (x === null || x === undefined) return "";
+  const n = Number(x);
+  if (Number.isNaN(n)) return String(x);
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function fmtPct(x) {
+  if (x === null || x === undefined) return "";
+  const n = Number(x);
+  if (Number.isNaN(n)) return String(x);
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 }) + "%";
+}
+
+async function loadGroupPerformance() {
+  const el = document.getElementById("groupTable");
+  if (!el) return;
+
+  try {
+    const r = await fetch("/group_performance");
+    const j = await r.json();
+
+    if (!j || j.ok !== true) {
+      el.textContent = "Group Performance: (no data / error)";
+      return;
+    }
+
+    const rows = j.rows || [];
+
+    let html = "";
+    html += "GROUP PERFORMANCE (TSLA cycles)\n";
+    html += "-----------------------------------------------\n";
+
+    if (rows.length === 0) {
+      html += "(no rows)\n";
+      el.textContent = html;
+      return;
+    }
+
+    // Build a fixed-width text table (monospace)
+    const header =
+      ["cycle_start_ct","cycle_last_ct","buy_qty","avg_buy","sell_qty","avg_sell","pnl","pnl_pct","status","result"]
+      .join(" | ");
+
+    html += header + "\n";
+    html += "-".repeat(header.length) + "\n";
+
+    for (const r of rows) {
+      html += [
+        r.cycle_start_ct || "",
+        r.cycle_last_ct || "",
+        fmtNum(r.buy_qty),
+        fmtNum(r.avg_buy_price),
+        fmtNum(r.sell_qty),
+        fmtNum(r.avg_sell_price),
+        fmtNum(r.pnl),
+        fmtPct(r.pnl_pct),
+        r.cycle_status || "",
+        r.win_loss || "",
+      ].join(" | ") + "\n";
+    }
+
+    el.textContent = html;
+  } catch (e) {
+    const el2 = document.getElementById("groupTable");
+    if (el2) el2.textContent = "Group Performance: fetch failed";
+  }
+}
+
 // ----------------------------
 // Chart
 // ----------------------------
@@ -496,11 +565,16 @@ const LATEST_BAR_POLL_MS = 5000; // poll 5s so new candle appears quickly
   await loadMarkers();
   await fetchPosition();
   await fetchLatestBar();
+  await loadGroupPerformance();   // <-- RUN ON BOOT
 })();
 
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
 setInterval(fetchPosition, 2000);
-setInterval(loadMarkers, 5000);
+
+setInterval(() => {
+  loadMarkers();
+  loadGroupPerformance();   // <-- REFRESH EVERY 5s
+}, 5000);
 
 // IMPORTANT: do NOT keep reloading history every 60s
 // setInterval(loadHistory, 60000);
