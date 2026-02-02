@@ -10,7 +10,8 @@
     <style>
       html, body { height: 100%; margin: 0; }
       body { font-family: Arial, sans-serif; background: #0e1117; color: #d1d4dc; overflow: hidden; }
-    
+
+      /* Top bar */
       #topbar {
         height: 48px;
         box-sizing: border-box;
@@ -20,24 +21,50 @@
         align-items: center;
         gap: 12px;
       }
-    
+      #topbar .spacer { flex: 1; }
+      #gp {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        opacity: 0.95;
+        white-space: nowrap;
+      }
+
+      /* Main layout */
       #chartWrap {
         position: relative;
-        height: 100%;
+        height: calc(100% - 48px); /* subtract topbar */
       }
-    
+
       #chart {
         position: absolute;
         top: 0;
         left: 0;
         right: 0;
-        bottom: 48px; /* <-- makes room for the time scale */
+        bottom: 180px; /* reserve space for group table */
       }
 
+      #groupTable {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 180px;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border-top: 1px solid #1f2430;
+        background: rgba(0,0,0,0.25);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        white-space: nowrap;
+        overflow-x: auto;
+        overflow-y: auto;
+      }
+
+      /* Floating OHLC box */
       #bar {
         position: absolute;
         right: 12px;
-        bottom: 12px;
+        bottom: 190px; /* keep above group table */
         width: 360px;
         max-height: 40%;
         overflow: auto;
@@ -51,23 +78,27 @@
         backdrop-filter: blur(6px);
       }
     </style>
-
   </head>
-  
+
   <body>
-  <div id="topbar">
-    <strong>Alpaca Dashboard</strong>
-    <span id="status">loading…</span>
-  </div>
+    <div id="topbar">
+      <strong>Alpaca Dashboard</strong>
+      <span id="status">loading…</span>
 
-  <div id="chartWrap">
-    <div id="chart"></div>
-    <pre id="bar"></pre>
-  </div>
+      <div class="spacer"></div>
 
-  <script src="/static/app.js"></script>
-  <div id="groupTable" style="padding:10px; font-family: monospace; white-space: nowrap; overflow-x:auto;"></div>
+      <!-- NEW: Group Performance mini-summary goes here -->
+      <span id="gp">GP: (loading…)</span>
+    </div>
 
-</body>
-  
+    <div id="chartWrap">
+      <div id="chart"></div>
+      <pre id="bar"></pre>
+
+      <!-- NEW: Group performance table area -->
+      <div id="groupTable"></div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
 </html>
