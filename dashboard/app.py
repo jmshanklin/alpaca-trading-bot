@@ -1,5 +1,7 @@
 import os
 import time
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from threading import Lock
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -68,6 +70,16 @@ def _is_rth_ny(ts_utc: datetime) -> bool:
 def _fmt_ct(ts_utc: datetime) -> str:
     """Human display in Chicago time."""
     return ts_utc.astimezone(TZ_CHI).strftime("%-m/%-d, %-I:%M %p")
+    
+def _db_url() -> str:
+    url = os.getenv("DATABASE_URL", "")
+    if not url:
+        raise ValueError("Missing DATABASE_URL (set it in Render -> alpaca-dashboard -> Environment)")
+    return url
+
+def _db_conn():
+    # Render Postgres typically requires SSL
+    return psycopg2.connect(_db_url(), sslmode="require")
 
 # ============================================================
 # Routes
@@ -104,6 +116,99 @@ def config():
         "has_secret": bool(os.getenv("APCA_API_SECRET_KEY")),
         "sell_pct": float(os.getenv("SELL_PCT", "0.002")),
     }
+    
+@app.get("/group_performance")
+def group_performance(limit: int = 25):
+    """
+    One TSLA cycle (group_id) = one row
+    PnL = sum(sells) - sum(buys), using est_price
+    Times shown in Chicago time with AM/PM
+    """
+    symbol = _symbol()
+
+    sql = """
+    WITH base AS (
+      SELECT
+        id,
+        ts_utc,
+        symbol,
+        side,
+        qty,
+        est_price,
+        is_dry_run,
+        group_id
+      FROM trade_journal
+      WHERE symbol = %s
+        AND group_id IS NOT NULL
+    ),
+    agg AS (
+      SELECT
+        group_id,
+        MIN(ts_utc) AS cycle_start_utc,
+        MAX(ts_utc) AS cycle_last_utc,
+
+        COALESCE(SUM(qty) FILTER (WHERE side = 'BUY'), 0) AS buy_qty,
+        COALESCE(SUM(qty * est_price) FILTER (WHERE side = 'BUY'), 0) AS buy_notional,
+        CASE
+          WHEN COALESCE(SUM(qty) FILTER (WHERE side = 'BUY'), 0) > 0
+          THEN COALESCE(SUM(qty * est_price) FILTER (WHERE side = 'BUY'), 0)
+               / NULLIF(SUM(qty) FILTER (WHERE side = 'BUY'), 0)
+          ELSE NULL
+        END AS avg_buy_price,
+
+        COALESCE(SUM(qty) FILTER (WHERE side = 'SELL'), 0) AS sell_qty,
+        COALESCE(SUM(qty * est_price) FILTER (WHERE side = 'SELL'), 0) AS sell_notional,
+        CASE
+          WHEN COALESCE(SUM(qty) FILTER (WHERE side = 'SELL'), 0) > 0
+          THEN COALESCE(SUM(qty * est_price) FILTER (WHERE side = 'SELL'), 0)
+               / NULLIF(SUM(qty) FILTER (WHERE side = 'SELL'), 0)
+          ELSE NULL
+        END AS avg_sell_price,
+
+        (COALESCE(SUM(qty * est_price) FILTER (WHERE side = 'SELL'), 0)
+         - COALESCE(SUM(qty * est_price) FILTER (WHERE side = 'BUY'), 0)) AS pnl
+      FROM base
+      GROUP BY group_id
+    )
+    SELECT
+      group_id,
+
+      to_char(cycle_start_utc AT TIME ZONE 'UTC' AT TIME ZONE 'America/Chicago',
+              'YYYY-MM-DD HH:MI:SS AM') AS cycle_start_ct,
+      to_char(cycle_last_utc  AT TIME ZONE 'UTC' AT TIME ZONE 'America/Chicago',
+              'YYYY-MM-DD HH:MI:SS AM') AS cycle_last_ct,
+
+      buy_qty, buy_notional, avg_buy_price,
+      sell_qty, sell_notional, avg_sell_price,
+      pnl,
+
+      CASE
+        WHEN buy_notional > 0 THEN ROUND((pnl / buy_notional) * 100.0, 2)
+        ELSE NULL
+      END AS pnl_pct,
+
+      CASE
+        WHEN sell_qty > 0 THEN 'CLOSED'
+        ELSE 'OPEN'
+      END AS cycle_status,
+
+      CASE
+        WHEN sell_qty > 0 AND pnl >= 0 THEN 'WIN'
+        WHEN sell_qty > 0 AND pnl < 0 THEN 'LOSS'
+        ELSE NULL
+      END AS win_loss
+
+    FROM agg
+    ORDER BY cycle_last_utc DESC
+    LIMIT %s;
+    """
+
+    with _db_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, (symbol, limit))
+            rows = cur.fetchall()
+
+    return {"ok": True, "symbol": symbol, "rows": rows}
 
 # ============================================================
 # Latest Bar (last CLOSED bar; cached)
