@@ -73,7 +73,6 @@ def et_date_str(now_utc: datetime) -> str:
     except Exception:
         return now_utc.date().isoformat()
 
-
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -83,13 +82,14 @@ def is_live_endpoint(url: str) -> bool:
         return False
     return "api.alpaca.markets" in u
 
-
 def get_position_details(
     api: tradeapi.REST, symbol: str
-) -> Tuple[int, Optional[float], Optional[float], Optional[float]]:
+) -> Tuple[Optional[int], Optional[float], Optional[float], Optional[float], bool]:
     """
-    Returns: (qty, avg_entry, market_value, unrealized_pl)
-    If flat or unavailable: qty=0 and remaining fields None.
+    Returns: (qty, avg_entry, market_value, unrealized_pl, ok)
+
+    ok=True  -> values are reliable
+    ok=False -> position lookup failed; DO NOT treat as flat
     """
     try:
         pos = api.get_position(symbol)
@@ -102,13 +102,13 @@ def get_position_details(
         avg_entry = _f("avg_entry_price")
         mv = _f("market_value")
         upl = _f("unrealized_pl")
-        return qty, avg_entry, mv, upl
+        return qty, avg_entry, mv, upl, True
+
     except Exception as e:
         if "position does not exist" in str(e).lower():
-            return 0, None, None, None
+            return 0, None, None, None, True  # flat is a valid state
         logger.warning(f"GET_POSITION_FAILED: {e}")
-        return 0, None, None, None
-
+        return None, None, None, None, False
 
 def submit_market_buy(api: tradeapi.REST, symbol: str, qty: int, client_order_id: str):
     return api.submit_order(
@@ -437,7 +437,11 @@ def main():
                 continue
 
             # Position details
-            pos_qty, avg_entry, market_value, unrealized_pl = get_position_details(api, cfg.symbol)
+            pos_qty, avg_entry, market_value, unrealized_pl, pos_ok = get_position_details(api, cfg.symbol)
+            if not pos_ok:
+                logger.warning("POSITION_UNAVAILABLE: skipping tick (won't reset group_id)")
+                time.sleep(poll_sec)
+                continue
 
             # If Alpaca is flat, grid memory should be empty
             if pos_qty <= 0 and (
