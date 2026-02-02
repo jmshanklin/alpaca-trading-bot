@@ -74,7 +74,7 @@ def et_date_str(now_utc: datetime) -> str:
         return now_utc.date().isoformat()
 
 # ----------------------------
-# Helpers
+#          Helpers
 # ----------------------------
 def is_live_endpoint(url: str) -> bool:
     u = (url or "").lower()
