@@ -740,10 +740,17 @@ async function fetchPosition() {
       title: `Avg Entry (${p.qty})`,
     });
 
+    // NEW: sell target is anchor_price + SELL_RISE_USD (not avg_entry * (1+SELL_PCT))
+    const rise = Number(p.sell_rise_usd ?? 0);
+
     sellTargetLine.applyOptions({
       price: p.sell_target,
-      title: `Sell Target (+${(p.sell_pct * 100).toFixed(3)}%)`,
+      title: `Sell Target (+$${rise.toFixed(2)} from anchor)`,
     });
+
+    // Optional: if you want to verify anchor is being computed, uncomment:
+    // console.log("anchor_price:", p.anchor_price, "sell_target:", p.sell_target, "rise:", p.sell_rise_usd);
+
   } catch (e) {
     console.error("fetchPosition failed", e);
   }
