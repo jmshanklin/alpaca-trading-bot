@@ -697,7 +697,41 @@ async function loadHistory(refit = false) {
     lastFeed = data.feed;
     historyCount = data.bars.length;
 
-    candles.setData(data.bars);
+// Normalize bars so Lightweight Charts always sees numeric epoch seconds in `time`
+const bars = (data.bars || []).map(b => {
+  let t = b.time;
+
+  // If backend sends { timestamp: ... }
+  if (t && typeof t === "object" && typeof t.timestamp === "number") {
+    t = t.timestamp;
+  }
+
+  // If backend sends an ISO string
+  if (typeof t === "string") {
+    const parsed = Math.floor(new Date(t).getTime() / 1000);
+    if (Number.isFinite(parsed)) t = parsed;
+  }
+
+  // If backend sends milliseconds
+  if (typeof t === "number" && t > 2_000_000_000_000) {
+    t = Math.floor(t / 1000);
+  }
+
+  // Snap to minute
+  if (typeof t === "number") {
+    t = Math.floor(t / 60) * 60;
+  }
+
+  return {
+    time: t,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+  };
+});
+
+candles.setData(bars);
 
     // IMPORTANT: only refit when you explicitly ask (toggle / first load)
     if (refit) {
