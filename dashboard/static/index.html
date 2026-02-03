@@ -9,9 +9,16 @@
 
     <style>
       html, body { height: 100%; margin: 0; }
-      body { font-family: Arial, sans-serif; background: #0e1117; color: #d1d4dc; overflow: hidden; }
+      body {
+        font-family: Arial, sans-serif;
+        background: #0e1117;
+        color: #d1d4dc;
+        overflow: hidden;
+      }
 
-      /* Top bar */
+      /* ----------------------------
+         Top bar
+      ---------------------------- */
       #topbar {
         height: 48px;
         box-sizing: border-box;
@@ -29,49 +36,89 @@
         white-space: nowrap;
       }
 
-      /* Main layout */
+      /* ----------------------------
+         Main layout
+      ---------------------------- */
       #chartWrap {
         position: relative;
         height: calc(100% - 48px); /* subtract topbar */
       }
 
+      /* Chart area (reserve space for bottom table) */
       #chart {
         position: absolute;
         top: 0;
         left: 0;
         right: 0;
-        bottom: 180px; /* reserve space for group table */
+        bottom: 220px; /* MUST match groupTableWrap height */
       }
 
-      #groupTable {
+      /* ----------------------------
+         Bottom group table (REAL TABLE)
+      ---------------------------- */
+      #groupTableWrap {
         position: absolute;
         left: 0;
         right: 0;
         bottom: 0;
-        height: 180px;
+        height: 220px;
         box-sizing: border-box;
-        padding: 10px 12px;
         border-top: 1px solid #1f2430;
-        background: rgba(0,0,0,0.25);
+        background: #0e1117;
+        overflow: auto;
+
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
         font-size: 12px;
-        white-space: nowrap;
-        overflow-x: auto;
-        overflow-y: auto;
       }
 
-      /* Floating OHLC box */
+      /* The table itself */
+      #groupTable {
+        width: 100%;
+        border-collapse: collapse;
+        white-space: nowrap;
+      }
+
+      /* Sticky header */
+      #groupTable thead th {
+        position: sticky;
+        top: 0;
+        background: #0e1117;
+        border-bottom: 1px solid #1f2430;
+        padding: 8px 10px;
+        text-align: left;
+        font-weight: 700;
+        z-index: 2;
+      }
+
+      #groupTable td {
+        padding: 6px 10px;
+        border-bottom: 1px solid #1f2430;
+      }
+
+      #groupTable tr:hover td {
+        background: rgba(255,255,255,0.03);
+      }
+
+      /* Optional: subtle alignment helpers */
+      .num { text-align: right; }
+      .dim { opacity: 0.85; }
+
+      /* ----------------------------
+         Floating debug/JSON box
+      ---------------------------- */
       #bar {
         position: absolute;
         right: 12px;
-        bottom: 190px; /* keep above group table */
+        bottom: 232px; /* keep above group table (220) + padding */
         width: 360px;
         max-height: 40%;
         overflow: auto;
         padding: 10px;
         margin: 0;
+
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
         font-size: 12px;
+
         background: rgba(0,0,0,0.35);
         border: 1px solid #1f2430;
         border-radius: 8px;
@@ -87,7 +134,7 @@
 
       <div class="spacer"></div>
 
-      <!-- NEW: Group Performance mini-summary goes here -->
+      <!-- Group Performance mini-summary -->
       <span id="gp">GP: (loading…)</span>
     </div>
 
@@ -95,8 +142,10 @@
       <div id="chart"></div>
       <pre id="bar"></pre>
 
-      <!-- NEW: Group performance table area -->
-      <div id="groupTable"></div>
+      <!-- Bottom table area -->
+      <div id="groupTableWrap">
+        <table id="groupTable"></table>
+      </div>
     </div>
 
     <script src="/static/app.js"></script>
