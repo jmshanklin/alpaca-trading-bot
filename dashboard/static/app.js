@@ -780,7 +780,7 @@ async function fetchPosition() {
 
     sellTargetLine.applyOptions({
       price: p.sell_target,
-      title: `Sell Target (+$${rise.toFixed(2)} from anchor)`,
+      title: `Sell Target (+$${Number(p.sell_rise_usd).toFixed(2)} from anchor)`,
     });
 
     // Optional: if you want to verify anchor is being computed, uncomment:
