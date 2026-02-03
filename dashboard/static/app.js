@@ -4,6 +4,8 @@
 // + Avg Entry line (gold) + Sell Target line (blue)
 // + BUY/SELL markers (from /fills)
 // + BUY numbering resets ONLY when position size returns to ZERO
+// + Right padding controls (Pad +/-) to pull candles away from price scale
+// + Ruler tool (measure price/time between 2 points)
 // ------------------------------------
 
 const statusEl = document.getElementById("status");
@@ -69,27 +71,22 @@ function minuteFloor(tsSec) {
   return Math.floor(tsSec / 60) * 60;
 }
 
-function fmtNum(x) {
-  if (x === null || x === undefined) return "";
-  const n = Number(x);
-  if (Number.isNaN(n)) return String(x);
-  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+function fmtSigned(n, decimals = 2) {
+  if (!Number.isFinite(n)) return "—";
+  const s = n >= 0 ? "+" : "";
+  return s + n.toFixed(decimals);
 }
 
-function fmtPct(x) {
-  if (x === null || x === undefined) return "";
-  const n = Number(x);
-  if (Number.isNaN(n)) return String(x);
-  return n.toLocaleString(undefined, { maximumFractionDigits: 2 }) + "%";
-}
-
+// ----------------------------
+// Group Performance
+// ----------------------------
 async function loadGroupPerformance() {
   const gpEl = document.getElementById("gp");
   const tableEl = document.getElementById("groupTable");
   if (!gpEl || !tableEl) return;
 
   try {
-    const r = await fetch("/group_performance");
+    const r = await fetch("/group_performance", { cache: "no-store" });
     const j = await r.json();
 
     if (!j || j.ok === false) {
@@ -98,14 +95,13 @@ async function loadGroupPerformance() {
       return;
     }
 
-    // j.rows should be an array of cycles (one row per group_id)
     const rows = Array.isArray(j.rows) ? j.rows : [];
 
-    // --- top-bar mini summary (OPEN/CLOSED counts + last pnl)
+    // Summary counts
     const openCount = rows.filter(x => (x.cycle_status || "").toUpperCase() === "OPEN").length;
     const closedCount = rows.filter(x => (x.cycle_status || "").toUpperCase() === "CLOSED").length;
 
-    // pick most recent row by cycle_last_ct if available, else first row
+    // "Last" row: keep your original behavior (rows[0]) because we don't know your sort order.
     const last = rows[0] || null;
     const lastPnl = last && typeof last.pnl === "number" ? last.pnl : null;
     const lastPct = last && typeof last.pnl_pct === "number" ? last.pnl_pct : null;
@@ -115,13 +111,11 @@ async function loadGroupPerformance() {
       (lastPnl !== null ? ` | Last PnL ${lastPnl.toFixed(2)}` : "") +
       (lastPct !== null ? ` (${lastPct.toFixed(2)}%)` : "");
 
-    // --- table area: show a compact text table
     if (!rows.length) {
       tableEl.textContent = "No group rows yet.";
       return;
     }
 
-    // Build monospace “table”
     const header = [
       "cycle_status",
       "win_loss",
@@ -183,22 +177,22 @@ const chart = LightweightCharts.createChart(chartEl, {
   timeScale: {
     timeVisible: true,
     secondsVisible: false,
-  
+
     // Default right padding (in bars)
     rightOffset: 12,
-  
+
     // Make candles less cramped overall
     barSpacing: 8,
-  
+
     borderVisible: true,
     ticksVisible: true,
-  
+
     // ✅ Important: don't hard-lock to the right edge
     fixRightEdge: false,
-  
+
     // Resize shouldn’t “re-pin” the last bar
     lockVisibleTimeRangeOnResize: false,
-  }, 
+  },
   crosshair: {
     mode: 1,
     vertLine: {
@@ -230,95 +224,6 @@ const chart = LightweightCharts.createChart(chartEl, {
     },
   },
 });
-
-// ----------------------------
-// UI: History Mode toggle button
-// ----------------------------
-const toggleBtn = document.createElement("button");
-toggleBtn.textContent = "History: OFF";
-toggleBtn.style.marginLeft = "12px";
-toggleBtn.style.padding = "6px 10px";
-toggleBtn.style.borderRadius = "8px";
-toggleBtn.style.border = "1px solid #1f2430";
-toggleBtn.style.background = "#0e1117";
-toggleBtn.style.color = "#d1d4dc";
-toggleBtn.style.cursor = "pointer";
-toggleBtn.title = "Toggle History Mode (loads more 1-min bars)";
-
-// Put it next to your status line
-statusEl.parentElement.appendChild(toggleBtn);
-
-// ----------------------------
-// UI: Right-padding controls (pull candles away from price scale)
-// ----------------------------
-let RIGHT_PAD = 12;
-
-function applyRightPad() {
-  chart.timeScale().applyOptions({ rightOffset: RIGHT_PAD });
-}
-
-// Create buttons
-const padMinusBtn = document.createElement("button");
-padMinusBtn.textContent = "Pad −";
-padMinusBtn.style.marginLeft = "8px";
-padMinusBtn.style.padding = "6px 10px";
-padMinusBtn.style.borderRadius = "8px";
-padMinusBtn.style.border = "1px solid #1f2430";
-padMinusBtn.style.background = "#0e1117";
-padMinusBtn.style.color = "#d1d4dc";
-padMinusBtn.style.cursor = "pointer";
-padMinusBtn.title = "Decrease right padding (move candles closer)";
-
-const padPlusBtn = document.createElement("button");
-padPlusBtn.textContent = "Pad +";
-padPlusBtn.style.marginLeft = "6px";
-padPlusBtn.style.padding = "6px 10px";
-padPlusBtn.style.borderRadius = "8px";
-padPlusBtn.style.border = "1px solid #1f2430";
-padPlusBtn.style.background = "#0e1117";
-padPlusBtn.style.color = "#d1d4dc";
-padPlusBtn.style.cursor = "pointer";
-padPlusBtn.title = "Increase right padding (pull candles left)";
-
-// Attach to topbar
-statusEl.parentElement.appendChild(padMinusBtn);
-statusEl.parentElement.appendChild(padPlusBtn);
-
-// Button behavior
-padMinusBtn.onclick = () => {
-  RIGHT_PAD = Math.max(0, RIGHT_PAD - 2);
-  applyRightPad();
-};
-
-padPlusBtn.onclick = () => {
-  RIGHT_PAD = Math.min(80, RIGHT_PAD + 2);
-  applyRightPad();
-};
-
-// Keyboard shortcuts: [ = less pad, ] = more pad
-window.addEventListener("keydown", (e) => {
-  if (e.key === "[") {
-    RIGHT_PAD = Math.max(0, RIGHT_PAD - 2);
-    applyRightPad();
-  }
-  if (e.key === "]") {
-    RIGHT_PAD = Math.min(80, RIGHT_PAD + 2);
-    applyRightPad();
-  }
-});
-
-// Apply initial pad
-applyRightPad();
-
-toggleBtn.onclick = async () => {
-  HISTORY_MODE = !HISTORY_MODE;
-  toggleBtn.textContent = HISTORY_MODE ? "History: ON" : "History: OFF";
-
-  // Re-load candles + markers for the selected mode
-  await loadHistory(true);        // true = refit
-  await loadMarkers();            // refresh markers after reload
-  await fetchPosition();          // refresh lines
-};
 
 // ✅ Candles series
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
@@ -361,6 +266,206 @@ const sellTargetLine = candles.createPriceLine({
 });
 
 // ----------------------------
+// UI: History Mode toggle button
+// ----------------------------
+const toggleBtn = document.createElement("button");
+toggleBtn.textContent = "History: OFF";
+toggleBtn.style.marginLeft = "12px";
+toggleBtn.style.padding = "6px 10px";
+toggleBtn.style.borderRadius = "8px";
+toggleBtn.style.border = "1px solid #1f2430";
+toggleBtn.style.background = "#0e1117";
+toggleBtn.style.color = "#d1d4dc";
+toggleBtn.style.cursor = "pointer";
+toggleBtn.title = "Toggle History Mode (loads more 1-min bars)";
+statusEl.parentElement.appendChild(toggleBtn);
+
+// ----------------------------
+// UI: Right-padding controls (pull candles away from price scale)
+// ----------------------------
+let RIGHT_PAD = 12;
+
+function applyRightPad() {
+  chart.timeScale().applyOptions({ rightOffset: RIGHT_PAD });
+}
+
+const padMinusBtn = document.createElement("button");
+padMinusBtn.textContent = "Pad −";
+padMinusBtn.style.marginLeft = "8px";
+padMinusBtn.style.padding = "6px 10px";
+padMinusBtn.style.borderRadius = "8px";
+padMinusBtn.style.border = "1px solid #1f2430";
+padMinusBtn.style.background = "#0e1117";
+padMinusBtn.style.color = "#d1d4dc";
+padMinusBtn.style.cursor = "pointer";
+padMinusBtn.title = "Decrease right padding (move candles closer)";
+
+const padPlusBtn = document.createElement("button");
+padPlusBtn.textContent = "Pad +";
+padPlusBtn.style.marginLeft = "6px";
+padPlusBtn.style.padding = "6px 10px";
+padPlusBtn.style.borderRadius = "8px";
+padPlusBtn.style.border = "1px solid #1f2430";
+padPlusBtn.style.background = "#0e1117";
+padPlusBtn.style.color = "#d1d4dc";
+padPlusBtn.style.cursor = "pointer";
+padPlusBtn.title = "Increase right padding (pull candles left)";
+
+statusEl.parentElement.appendChild(padMinusBtn);
+statusEl.parentElement.appendChild(padPlusBtn);
+
+padMinusBtn.onclick = () => {
+  RIGHT_PAD = Math.max(0, RIGHT_PAD - 2);
+  applyRightPad();
+};
+
+padPlusBtn.onclick = () => {
+  RIGHT_PAD = Math.min(80, RIGHT_PAD + 2);
+  applyRightPad();
+};
+
+// Keyboard shortcuts: [ = less pad, ] = more pad
+window.addEventListener("keydown", (e) => {
+  if (e.key === "[") {
+    RIGHT_PAD = Math.max(0, RIGHT_PAD - 2);
+    applyRightPad();
+  }
+  if (e.key === "]") {
+    RIGHT_PAD = Math.min(80, RIGHT_PAD + 2);
+    applyRightPad();
+  }
+});
+
+applyRightPad();
+
+toggleBtn.onclick = async () => {
+  HISTORY_MODE = !HISTORY_MODE;
+  toggleBtn.textContent = HISTORY_MODE ? "History: ON" : "History: OFF";
+
+  await loadHistory(true); // refit
+  await loadMarkers();
+  await fetchPosition();
+};
+
+// ----------------------------
+// RULER TOOL (measure price + time between 2 points)
+// - Click 1: set A
+// - Move: live preview to B
+// - Click 2: lock B
+// - Click 3: reset (new A)
+// - Esc: clear current measurement
+// ----------------------------
+let RULER_MODE = false;
+let rulerA = null;          // { time, price }
+let rulerB = null;          // { time, price }
+let rulerLocked = false;
+
+// A simple line series to draw the ruler between A and B
+const rulerLine = chart.addSeries(LightweightCharts.LineSeries, {
+  lineWidth: 2,
+  priceLineVisible: false,
+  lastValueVisible: false,
+});
+
+// Create a small overlay readout for ruler measurements
+const rulerBox = document.createElement("div");
+rulerBox.style.position = "absolute";
+rulerBox.style.right = "12px";
+rulerBox.style.top = "60px";
+rulerBox.style.zIndex = "12";
+rulerBox.style.padding = "6px 10px";
+rulerBox.style.borderRadius = "8px";
+rulerBox.style.border = "1px solid #1f2430";
+rulerBox.style.background = "rgba(0,0,0,0.65)";
+rulerBox.style.backdropFilter = "blur(6px)";
+rulerBox.style.fontFamily =
+  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+rulerBox.style.fontSize = "12px";
+rulerBox.style.whiteSpace = "nowrap";
+rulerBox.style.display = "none";
+rulerBox.textContent = "Ruler: —";
+chartEl.parentElement.appendChild(rulerBox);
+
+// Add a button to the topbar
+const rulerBtn = document.createElement("button");
+rulerBtn.textContent = "Ruler: OFF";
+rulerBtn.style.marginLeft = "8px";
+rulerBtn.style.padding = "6px 10px";
+rulerBtn.style.borderRadius = "8px";
+rulerBtn.style.border = "1px solid #1f2430";
+rulerBtn.style.background = "#0e1117";
+rulerBtn.style.color = "#d1d4dc";
+rulerBtn.style.cursor = "pointer";
+rulerBtn.title = "Toggle ruler tool (click 2 points to measure)";
+statusEl.parentElement.appendChild(rulerBtn);
+
+function clearRuler() {
+  rulerA = null;
+  rulerB = null;
+  rulerLocked = false;
+  rulerLine.setData([]);
+  if (RULER_MODE) rulerBox.textContent = "Ruler: click point A…";
+}
+
+rulerBtn.onclick = () => {
+  RULER_MODE = !RULER_MODE;
+
+  rulerBtn.textContent = RULER_MODE ? "Ruler: ON" : "Ruler: OFF";
+  rulerBox.style.display = RULER_MODE ? "block" : "none";
+
+  if (!RULER_MODE) {
+    clearRuler();
+    rulerBox.textContent = "Ruler: —";
+  } else {
+    clearRuler();
+    rulerBox.textContent = "Ruler: click point A…";
+  }
+};
+
+// Esc clears ruler measurement (only when ruler is ON)
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && RULER_MODE) {
+    clearRuler();
+  }
+});
+
+// helper: extract point from chart params
+function pointFromParam(param) {
+  if (!param || !param.time) return null;
+
+  const tsSec = typeof param.time === "number" ? param.time : param.time?.timestamp;
+  if (!tsSec) return null;
+
+  const sd = param.seriesData?.get?.(candles);
+  if (!sd) return null;
+
+  const price = Number(sd.close);
+  if (!Number.isFinite(price)) return null;
+
+  return { time: tsSec, price };
+}
+
+function updateRulerVisuals() {
+  if (!RULER_MODE || !rulerA || !rulerB) return;
+
+  rulerLine.setData([
+    { time: rulerA.time, value: rulerA.price },
+    { time: rulerB.time, value: rulerB.price },
+  ]);
+
+  const dp = rulerB.price - rulerA.price;
+  const pct = (dp / rulerA.price) * 100;
+
+  const dtSec = Math.abs(rulerB.time - rulerA.time);
+  const dtMin = dtSec / 60;
+  const bars = Math.round(dtMin); // assumes 1-min bars
+
+  rulerBox.textContent =
+    `ΔPrice ${fmtSigned(dp, 2)}  |  Δ% ${fmtSigned(pct, 2)}%  |  ` +
+    `ΔTime ${dtMin.toFixed(1)}m  |  Bars ${bars}`;
+}
+
+// ----------------------------
 // BUY/SELL markers (from /fills)
 // - BUYs numbered B1, B2, B3...
 // - RESET numbering ONLY when position size returns to 0
@@ -378,13 +483,12 @@ async function loadMarkers() {
     if (!data.ok || !Array.isArray(data.fills)) return;
     if (!markersLayer) return;
 
-    // Oldest → newest is REQUIRED for correct “running position” math
     const fills = [...data.fills].sort(
       (a, b) => new Date(a.filled_at) - new Date(b.filled_at)
     );
 
-    let runningQty = 0;   // our reconstructed position size from fills
-    let buyCount = 0;     // B1, B2, ... for the current open-position group
+    let runningQty = 0;
+    let buyCount = 0;
 
     const markers = [];
 
@@ -402,9 +506,7 @@ async function loadMarkers() {
       if (!(isBuy || isSell) || !Number.isFinite(qty) || qty <= 0) continue;
 
       if (isBuy) {
-        // If we were flat (0) and a new buy comes in, this is a NEW group.
         if (runningQty === 0) buyCount = 0;
-
         runningQty += qty;
         buyCount += 1;
 
@@ -418,7 +520,6 @@ async function loadMarkers() {
       }
 
       if (isSell) {
-        // Apply sell to running position
         runningQty = Math.max(0, runningQty - qty);
 
         markers.push({
@@ -429,14 +530,12 @@ async function loadMarkers() {
           text: `S ${qty}@${px.toFixed(2)}`,
         });
 
-        // ✅ ONLY reset when the position is fully closed
         if (runningQty === 0) {
           buyCount = 0;
         }
       }
     }
 
-    // Keep markers ordered (helps chart)
     markers.sort((a, b) => a.time - b.time);
 
     const h = hashMarkers(markers);
@@ -518,10 +617,47 @@ chart.subscribeCrosshairMove((param) => {
   }
 
   const tsSec = typeof param.time === "number" ? param.time : param.time?.timestamp;
-  const seriesData = param.seriesData.get(candles);
+  const seriesData = param.seriesData?.get?.(candles);
   if (!seriesData) return;
 
   setReadoutFromBar(tsSec, seriesData);
+
+  // ----- Ruler live preview -----
+  if (RULER_MODE && rulerA && !rulerLocked) {
+    const pt = pointFromParam(param);
+    if (pt) {
+      rulerB = pt;
+      updateRulerVisuals();
+    }
+  }
+});
+
+// ----------------------------
+// Ruler clicks (A then B)
+// ----------------------------
+chart.subscribeClick((param) => {
+  if (!RULER_MODE) return;
+
+  const pt = pointFromParam(param);
+  if (!pt) return;
+
+  if (rulerA && rulerB && rulerLocked) {
+    clearRuler();
+    rulerA = pt;
+    rulerBox.textContent = "Ruler: move to preview B, click to lock…";
+    return;
+  }
+
+  if (!rulerA) {
+    rulerA = pt;
+    rulerLocked = false;
+    rulerBox.textContent = "Ruler: move to preview B, click to lock…";
+    return;
+  }
+
+  rulerB = pt;
+  rulerLocked = true;
+  updateRulerVisuals();
 });
 
 // ----------------------------
@@ -563,7 +699,6 @@ async function loadHistory(refit = false) {
       applyRightPad(); // ✅ keep right padding after refit
     }
 
-    // last bar
     const last = data.bars[data.bars.length - 1];
     lastBarTime = last.time;
     lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
@@ -571,7 +706,9 @@ async function loadHistory(refit = false) {
 
     resizeChart();
 
-    setStatus(`${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(last.time)} | ${HISTORY_MODE ? "HISTORY" : "LIVE"}`);
+    setStatus(
+      `${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(last.time)} | ${HISTORY_MODE ? "HISTORY" : "LIVE"}`
+    );
   } catch (e) {
     console.error("loadHistory error:", e);
     setStatus("history error");
@@ -623,7 +760,7 @@ async function fetchLatestBar() {
     lastFeed = data.feed || lastFeed;
 
     const barTime = Math.floor(new Date(data.t).getTime() / 1000);
-    const barTimeMin = Math.floor(barTime / 60) * 60; // ✅ snap to minute
+    const barTimeMin = Math.floor(barTime / 60) * 60;
 
     if (barTimeMin !== lastBarTime) {
       lastBarTime = barTimeMin;
@@ -639,8 +776,6 @@ async function fetchLatestBar() {
 
       setReadoutFromBar(lastBarTime, lastBarObj);
 
-      // Fills/markers often change right after a new bar closes (and after orders fill)
-      // so refresh markers when a new bar arrives.
       loadMarkers().catch(() => {});
     }
 
@@ -657,7 +792,7 @@ async function fetchLatestBar() {
 // ----------------------------
 // Start
 // ----------------------------
-const LATEST_BAR_POLL_MS = 5000; // poll 5s so new candle appears quickly
+const LATEST_BAR_POLL_MS = 5000;
 
 (async function boot() {
   await loadHistory(true);   // fit once on boot
