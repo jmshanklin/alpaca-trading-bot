@@ -728,6 +728,7 @@ async function fetchPosition() {
   try {
     const r = await fetch("/position", { cache: "no-store" });
     const p = await r.json();
+    console.log("POSITION:", p);
 
     if (!p.ok || !p.qty || p.qty <= 0) {
       avgEntryLine.applyOptions({ price: 0, title: "Avg Entry" });
