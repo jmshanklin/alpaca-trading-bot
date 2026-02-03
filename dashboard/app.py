@@ -440,37 +440,151 @@ def bars(limit: int = 300):
         "last_ct": _fmt_ct(last_ts_utc),
     }
 
+import os
+from datetime import datetime, timezone
+from typing import Optional, Tuple
+
+# -------------------------
+# Env helper
+# -------------------------
+def _sell_rise_usd() -> float:
+    """
+    Dollar amount ABOVE the anchor (first buy in the current group)
+    that should trigger a SELL.
+    Default: 2.0
+    """
+    try:
+        return float(os.getenv("SELL_RISE_USD", "2") or "2")
+    except Exception:
+        return 2.0
+
+
+def _parse_dt(x) -> Optional[datetime]:
+    """
+    Alpaca activities sometimes come as datetime, sometimes as string.
+    Normalize to aware UTC datetime when possible.
+    """
+    if x is None:
+        return None
+    if isinstance(x, datetime):
+        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+    try:
+        # Alpaca often returns ISO like '2026-02-03T01:23:45.123Z'
+        s = str(x).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _anchor_from_recent_fills(api, symbol: str, lookback: int = 500) -> Tuple[Optional[float], Optional[datetime]]:
+    """
+    Reconstruct the CURRENT group's anchor price:
+    - Sort fills oldest->newest
+    - Track running position qty
+    - Every time running qty goes from 0 -> >0 on a BUY, that BUY price becomes the new anchor
+    - Sells reduce running qty; when qty returns to 0, the next buy starts a new group
+
+    Returns: (anchor_price, anchor_time_utc)
+    """
+    try:
+        acts = api.list_activities(activity_types="FILL", limit=lookback)
+    except Exception:
+        return (None, None)
+
+    # Filter to symbol and normalize
+    fills = []
+    for a in acts or []:
+        try:
+            if (getattr(a, "symbol", "") or "").upper() != symbol.upper():
+                continue
+            side = (getattr(a, "side", "") or "").lower()
+            qty = float(getattr(a, "qty", 0) or 0)
+            px = float(getattr(a, "price", 0) or 0)
+            dt = _parse_dt(getattr(a, "transaction_time", None) or getattr(a, "time", None) or getattr(a, "filled_at", None))
+            if side not in ("buy", "sell") or qty <= 0 or px <= 0:
+                continue
+            fills.append((dt, side, qty, px))
+        except Exception:
+            continue
+
+    # Oldest -> newest
+    fills.sort(key=lambda x: (x[0] or datetime(1970, 1, 1, tzinfo=timezone.utc)))
+
+    running_qty = 0.0
+    anchor_price = None
+    anchor_time = None
+
+    for (dt, side, qty, px) in fills:
+        if side == "buy":
+            # If we were flat, this buy starts a NEW group => set anchor
+            if running_qty <= 0:
+                anchor_price = px
+                anchor_time = dt
+            running_qty += qty
+
+        elif side == "sell":
+            running_qty = max(0.0, running_qty - qty)
+            # When we go flat, next buy will set a new anchor
+            if running_qty <= 0:
+                pass
+
+    # If we currently have a position but couldn't find an anchor, return None
+    return (anchor_price, anchor_time)
+
+
 # ============================================================
-# Position Info
+# Position Info (UPDATED: uses SELL_RISE_USD + anchor price)
 # ============================================================
 @app.get("/position")
 def position():
     api = _alpaca()
     symbol = _symbol()
-    sell_pct = _sell_pct()
+
+    sell_rise_usd = _sell_rise_usd()
+
+    # Keep sell_pct ONLY for backward compatibility / display if you want.
+    # It is NOT used to compute sell_target anymore.
+    try:
+        sell_pct = float(os.getenv("SELL_PCT", "0") or "0")
+    except Exception:
+        sell_pct = 0.0
 
     try:
         pos = api.get_position(symbol)
     except Exception:
+        # No open position
         return {
             "ok": True,
             "symbol": symbol,
             "qty": 0,
-            "sell_pct": sell_pct,
+            "avg_entry": None,
+            "anchor_price": None,
+            "sell_rise_usd": sell_rise_usd,
             "sell_target": None,
+            "sell_pct": sell_pct,
         }
 
     qty = float(pos.qty)
-    avg_entry = float(pos.avg_entry_price)
-    sell_target = (avg_entry * (1.0 + sell_pct)) if qty > 0 else None
+    avg_entry = float(pos.avg_entry_price) if qty > 0 else None
+
+    anchor_price, anchor_time = (None, None)
+    if qty > 0:
+        anchor_price, anchor_time = _anchor_from_recent_fills(api, symbol, lookback=500)
+
+    # NEW sell target logic
+    sell_target = (anchor_price + sell_rise_usd) if (qty > 0 and anchor_price is not None) else None
 
     return {
         "ok": True,
         "symbol": symbol,
         "qty": qty,
-        "avg_entry": avg_entry,
-        "sell_pct": sell_pct,
-        "sell_target": sell_target,
+        "avg_entry": avg_entry,                 # keep Avg Entry line
+        "anchor_price": anchor_price,           # NEW: anchor price for the group
+        "anchor_time_utc": anchor_time.isoformat() if anchor_time else None,
+        "sell_rise_usd": sell_rise_usd,         # NEW: $ rise above anchor
+        "sell_target": sell_target,             # NEW: anchor + $2
+        "sell_pct": sell_pct,                   # legacy (not used for sell_target)
         "market_price": float(pos.current_price),
         "unrealized_pl": float(pos.unrealized_pl),
         "unrealized_plpc": float(pos.unrealized_plpc),
