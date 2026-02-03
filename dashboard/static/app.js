@@ -111,12 +111,13 @@ async function loadGroupPerformance() {
       (lastPnl !== null ? ` | Last PnL ${lastPnl.toFixed(2)}` : "") +
       (lastPct !== null ? ` (${lastPct.toFixed(2)}%)` : "");
 
+    // --- table area: render REAL HTML table
     if (!rows.length) {
-      tableEl.textContent = "No group rows yet.";
+      tableEl.innerHTML = "<tbody><tr><td>No group rows yet.</td></tr></tbody>";
       return;
     }
-
-    const header = [
+    
+    const columns = [
       "cycle_status",
       "win_loss",
       "cycle_start_ct",
@@ -129,29 +130,34 @@ async function loadGroupPerformance() {
       "pnl_pct",
       "group_id"
     ];
-
-    const lines = [];
-    lines.push(header.join(" | "));
-    lines.push("-".repeat(140));
-
-    for (const x of rows.slice(0, 25)) {
-      const line = [
-        (x.cycle_status ?? ""),
-        (x.win_loss ?? ""),
-        (x.cycle_start_ct ?? ""),
-        (x.cycle_last_ct ?? ""),
-        (x.buy_qty ?? ""),
-        (x.avg_buy_price ?? ""),
-        (x.sell_qty ?? ""),
-        (x.avg_sell_price ?? ""),
-        (typeof x.pnl === "number" ? x.pnl.toFixed(2) : (x.pnl ?? "")),
-        (typeof x.pnl_pct === "number" ? x.pnl_pct.toFixed(2) : (x.pnl_pct ?? "")),
-        (x.group_id ?? "")
-      ].join(" | ");
-      lines.push(line);
+    
+    // Build table HTML
+    let html = "<thead><tr>";
+    for (const col of columns) {
+      html += `<th>${col}</th>`;
     }
+    html += "</tr></thead><tbody>";
+    
+    for (const x of rows.slice(0, 50)) {
+      html += "<tr>";
+      for (const col of columns) {
+        let val = x[col] ?? "";
+    
+        if (typeof val === "number") {
+          val = col.includes("pct")
+            ? val.toFixed(2) + "%"
+            : val.toFixed(2);
+        }
+    
+        html += `<td>${val}</td>`;
+      }
+      html += "</tr>";
+    }
+    
+    html += "</tbody>";
+    
+    tableEl.innerHTML = html;
 
-    tableEl.textContent = lines.join("\n");
   } catch (e) {
     gpEl.textContent = "GP: (exception)";
     tableEl.textContent = String(e);
