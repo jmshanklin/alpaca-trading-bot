@@ -86,37 +86,35 @@ async function loadGroupPerformance() {
   if (!gpEl || !tableEl) return;
 
   try {
-    const r = await fetch("/group_performance", { cache: "no-store" });
+    const r = await fetch("/group_performance?limit=50", { cache: "no-store" });
     const j = await r.json();
 
     if (!j || j.ok === false) {
       gpEl.textContent = "GP: (error)";
-      tableEl.textContent = JSON.stringify(j, null, 2);
+      tableEl.innerHTML = `<tbody><tr><td>${(j && j.error) ? j.error : "Unknown error"}</td></tr></tbody>`;
       return;
     }
 
     const rows = Array.isArray(j.rows) ? j.rows : [];
 
-    // Summary counts
     const openCount = rows.filter(x => (x.cycle_status || "").toUpperCase() === "OPEN").length;
     const closedCount = rows.filter(x => (x.cycle_status || "").toUpperCase() === "CLOSED").length;
 
-    // "Last" row: keep your original behavior (rows[0]) because we don't know your sort order.
-    const last = rows[0] || null;
-    const lastPnl = last && typeof last.pnl === "number" ? last.pnl : null;
-    const lastPct = last && typeof last.pnl_pct === "number" ? last.pnl_pct : null;
+    // backend sorts DESC by cycle_last_utc -> rows[0] is most recent
+    const lastClosed = rows.find(x => (x.cycle_status || "").toUpperCase() === "CLOSED") || null;
+    const lastPnl = lastClosed && typeof lastClosed.pnl === "number" ? lastClosed.pnl : null;
+    const lastPct = lastClosed && typeof lastClosed.pnl_pct === "number" ? lastClosed.pnl_pct : null;
 
     gpEl.textContent =
       `GP: OPEN ${openCount} | CLOSED ${closedCount}` +
       (lastPnl !== null ? ` | Last PnL ${lastPnl.toFixed(2)}` : "") +
       (lastPct !== null ? ` (${lastPct.toFixed(2)}%)` : "");
 
-    // --- table area: render REAL HTML table
     if (!rows.length) {
       tableEl.innerHTML = "<tbody><tr><td>No group rows yet.</td></tr></tbody>";
       return;
     }
-    
+
     const columns = [
       "cycle_status",
       "win_loss",
@@ -130,37 +128,35 @@ async function loadGroupPerformance() {
       "pnl_pct",
       "group_id"
     ];
-    
-    // Build table HTML
+
     let html = "<thead><tr>";
-    for (const col of columns) {
-      html += `<th>${col}</th>`;
-    }
+    for (const col of columns) html += `<th>${col}</th>`;
     html += "</tr></thead><tbody>";
-    
+
     for (const x of rows.slice(0, 50)) {
       html += "<tr>";
       for (const col of columns) {
-        let val = x[col] ?? "";
-    
+        let val = x[col];
+
+        if (val == null) val = "";
+
         if (typeof val === "number") {
-          val = col.includes("pct")
-            ? val.toFixed(2) + "%"
-            : val.toFixed(2);
+          if (col === "pnl_pct") val = val.toFixed(2) + "%";
+          else if (col.includes("price") || col === "pnl") val = val.toFixed(2);
+          else val = String(val);
         }
-    
+
         html += `<td>${val}</td>`;
       }
       html += "</tr>";
     }
-    
+
     html += "</tbody>";
-    
     tableEl.innerHTML = html;
 
   } catch (e) {
     gpEl.textContent = "GP: (exception)";
-    tableEl.textContent = String(e);
+    tableEl.innerHTML = `<tbody><tr><td>${String(e)}</td></tr></tbody>`;
   }
 }
 
@@ -183,20 +179,11 @@ const chart = LightweightCharts.createChart(chartEl, {
   timeScale: {
     timeVisible: true,
     secondsVisible: false,
-
-    // Default right padding (in bars)
     rightOffset: 12,
-
-    // Make candles less cramped overall
     barSpacing: 8,
-
     borderVisible: true,
     ticksVisible: true,
-
-    // ✅ Important: don't hard-lock to the right edge
     fixRightEdge: false,
-
-    // Resize shouldn’t “re-pin” the last bar
     lockVisibleTimeRangeOnResize: false,
   },
   crosshair: {
@@ -231,7 +218,6 @@ const chart = LightweightCharts.createChart(chartEl, {
   },
 });
 
-// ✅ Candles series
 const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   upColor: "#26a69a",
   downColor: "#ef5350",
@@ -241,7 +227,7 @@ const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   wickDownColor: "#ef5350",
 });
 
-// ✅ Markers support (v4 uses series.setMarkers, v5 uses createSeriesMarkers)
+// Markers support (v4 uses series.setMarkers, v5 uses createSeriesMarkers)
 const markersLayer =
   typeof candles.setMarkers === "function"
     ? { set: (ms) => candles.setMarkers(ms) }
@@ -252,10 +238,10 @@ const markersLayer =
         })()
       : null;
 
-// ✅ Price lines (define ONCE, right after candles exists)
+// Price lines
 const avgEntryLine = candles.createPriceLine({
   price: 0,
-  color: "#f5c542", // gold
+  color: "#f5c542",
   lineWidth: 2,
   lineStyle: 2,
   axisLabelVisible: true,
@@ -264,7 +250,7 @@ const avgEntryLine = candles.createPriceLine({
 
 const sellTargetLine = candles.createPriceLine({
   price: 0,
-  color: "#4aa3ff", // blue
+  color: "#4aa3ff",
   lineWidth: 2,
   lineStyle: 2,
   axisLabelVisible: true,
@@ -287,7 +273,7 @@ toggleBtn.title = "Toggle History Mode (loads more 1-min bars)";
 statusEl.parentElement.appendChild(toggleBtn);
 
 // ----------------------------
-// UI: Right-padding controls (pull candles away from price scale)
+// UI: Right-padding controls
 // ----------------------------
 let RIGHT_PAD = 12;
 
@@ -304,7 +290,7 @@ padMinusBtn.style.border = "1px solid #1f2430";
 padMinusBtn.style.background = "#0e1117";
 padMinusBtn.style.color = "#d1d4dc";
 padMinusBtn.style.cursor = "pointer";
-padMinusBtn.title = "Decrease right padding (move candles closer)";
+padMinusBtn.title = "Decrease right padding";
 
 const padPlusBtn = document.createElement("button");
 padPlusBtn.textContent = "Pad +";
@@ -315,7 +301,7 @@ padPlusBtn.style.border = "1px solid #1f2430";
 padPlusBtn.style.background = "#0e1117";
 padPlusBtn.style.color = "#d1d4dc";
 padPlusBtn.style.cursor = "pointer";
-padPlusBtn.title = "Increase right padding (pull candles left)";
+padPlusBtn.title = "Increase right padding";
 
 statusEl.parentElement.appendChild(padMinusBtn);
 statusEl.parentElement.appendChild(padPlusBtn);
@@ -348,32 +334,25 @@ toggleBtn.onclick = async () => {
   HISTORY_MODE = !HISTORY_MODE;
   toggleBtn.textContent = HISTORY_MODE ? "History: ON" : "History: OFF";
 
-  await loadHistory(true); // refit
+  await loadHistory(true);
   await loadMarkers();
   await fetchPosition();
 };
 
 // ----------------------------
-// RULER TOOL (measure price + time between 2 points)
-// - Click 1: set A
-// - Move: live preview to B
-// - Click 2: lock B
-// - Click 3: reset (new A)
-// - Esc: clear current measurement
+// RULER TOOL
 // ----------------------------
 let RULER_MODE = false;
 let rulerA = null;          // { time, price }
 let rulerB = null;          // { time, price }
 let rulerLocked = false;
 
-// A simple line series to draw the ruler between A and B
 const rulerLine = chart.addSeries(LightweightCharts.LineSeries, {
   lineWidth: 2,
   priceLineVisible: false,
   lastValueVisible: false,
 });
 
-// Create a small overlay readout for ruler measurements
 const rulerBox = document.createElement("div");
 rulerBox.style.position = "absolute";
 rulerBox.style.right = "12px";
@@ -392,7 +371,6 @@ rulerBox.style.display = "none";
 rulerBox.textContent = "Ruler: —";
 chartEl.parentElement.appendChild(rulerBox);
 
-// Add a button to the topbar
 const rulerBtn = document.createElement("button");
 rulerBtn.textContent = "Ruler: OFF";
 rulerBtn.style.marginLeft = "8px";
@@ -428,14 +406,12 @@ rulerBtn.onclick = () => {
   }
 };
 
-// Esc clears ruler measurement (only when ruler is ON)
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && RULER_MODE) {
     clearRuler();
   }
 });
 
-// helper: extract point from chart params
 function pointFromParam(param) {
   if (!param || !param.time) return null;
 
@@ -464,7 +440,7 @@ function updateRulerVisuals() {
 
   const dtSec = Math.abs(rulerB.time - rulerA.time);
   const dtMin = dtSec / 60;
-  const bars = Math.round(dtMin); // assumes 1-min bars
+  const bars = Math.round(dtMin);
 
   rulerBox.textContent =
     `ΔPrice ${fmtSigned(dp, 2)}  |  Δ% ${fmtSigned(pct, 2)}%  |  ` +
@@ -472,9 +448,7 @@ function updateRulerVisuals() {
 }
 
 // ----------------------------
-// BUY/SELL markers (from /fills)
-// - BUYs numbered B1, B2, B3...
-// - RESET numbering ONLY when position size returns to 0
+// BUY/SELL markers
 // ----------------------------
 let lastMarkersHash = "";
 
@@ -536,9 +510,7 @@ async function loadMarkers() {
           text: `S ${qty}@${px.toFixed(2)}`,
         });
 
-        if (runningQty === 0) {
-          buyCount = 0;
-        }
+        if (runningQty === 0) buyCount = 0;
       }
     }
 
@@ -555,7 +527,7 @@ async function loadMarkers() {
 }
 
 // ----------------------------
-// Resize Observer (stabilizes layout + time scale)
+// Resize Observer
 // ----------------------------
 function resizeChart() {
   chart.applyOptions({
@@ -605,8 +577,8 @@ function setReadoutFromBar(tsSec, bar) {
 // ----------------------------
 // State + Debug
 // ----------------------------
-let lastBarTime = null; // epoch sec (snapped to minute)
-let lastBarObj = null;  // {open,high,low,close}
+let lastBarTime = null;
+let lastBarObj = null;
 let lastSymbol = "—";
 let lastFeed = "—";
 let historyCount = 0;
@@ -628,7 +600,6 @@ chart.subscribeCrosshairMove((param) => {
 
   setReadoutFromBar(tsSec, seriesData);
 
-  // ----- Ruler live preview -----
   if (RULER_MODE && rulerA && !rulerLocked) {
     const pt = pointFromParam(param);
     if (pt) {
@@ -639,7 +610,7 @@ chart.subscribeCrosshairMove((param) => {
 });
 
 // ----------------------------
-// Ruler clicks (A then B)
+// Ruler clicks
 // ----------------------------
 chart.subscribeClick((param) => {
   if (!RULER_MODE) return;
@@ -684,7 +655,7 @@ async function loadHistory(refit = false) {
       feed: data.feed,
       bars: data.bars?.length || 0,
       mode: HISTORY_MODE ? "HISTORY" : "LIVE",
-      limit
+      limit,
     };
     barEl.textContent = JSON.stringify(debugState, null, 2);
 
@@ -697,49 +668,44 @@ async function loadHistory(refit = false) {
     lastFeed = data.feed;
     historyCount = data.bars.length;
 
-// Normalize bars so Lightweight Charts always sees numeric epoch seconds in `time`
-const bars = (data.bars || []).map(b => {
-  let t = b.time;
+    // Normalize bars to epoch seconds in `time`
+    const bars = (data.bars || []).map((b) => {
+      let t = b.time;
 
-  // If backend sends { timestamp: ... }
-  if (t && typeof t === "object" && typeof t.timestamp === "number") {
-    t = t.timestamp;
-  }
+      if (t && typeof t === "object" && typeof t.timestamp === "number") {
+        t = t.timestamp;
+      }
 
-  // If backend sends an ISO string
-  if (typeof t === "string") {
-    const parsed = Math.floor(new Date(t).getTime() / 1000);
-    if (Number.isFinite(parsed)) t = parsed;
-  }
+      if (typeof t === "string") {
+        const parsed = Math.floor(new Date(t).getTime() / 1000);
+        if (Number.isFinite(parsed)) t = parsed;
+      }
 
-  // If backend sends milliseconds
-  if (typeof t === "number" && t > 2_000_000_000_000) {
-    t = Math.floor(t / 1000);
-  }
+      if (typeof t === "number" && t > 2_000_000_000_000) {
+        t = Math.floor(t / 1000);
+      }
 
-  // Snap to minute
-  if (typeof t === "number") {
-    t = Math.floor(t / 60) * 60;
-  }
+      if (typeof t === "number") {
+        t = Math.floor(t / 60) * 60;
+      }
 
-  return {
-    time: t,
-    open: b.open,
-    high: b.high,
-    low: b.low,
-    close: b.close,
-  };
-});
+      return {
+        time: t,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+      };
+    });
 
-candles.setData(bars);
+    candles.setData(bars);
 
-    // IMPORTANT: only refit when you explicitly ask (toggle / first load)
     if (refit) {
       chart.timeScale().fitContent();
-      applyRightPad(); // ✅ keep right padding after refit
+      applyRightPad();
     }
 
-    const last = data.bars[data.bars.length - 1];
+    const last = bars[bars.length - 1];
     lastBarTime = last.time;
     lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
     setReadoutFromBar(lastBarTime, lastBarObj);
@@ -762,7 +728,6 @@ async function fetchPosition() {
   try {
     const r = await fetch("/position", { cache: "no-store" });
     const p = await r.json();
-    console.log("POSITION:", p);
 
     if (!p.ok || !p.qty || p.qty <= 0) {
       avgEntryLine.applyOptions({ price: 0, title: "Avg Entry" });
@@ -771,13 +736,11 @@ async function fetchPosition() {
     }
 
     avgEntryLine.applyOptions({
-      price: p.avg_entry,
+      price: Number(p.avg_entry),
       title: `Avg Entry (${p.qty})`,
     });
 
-    // NEW: sell target is anchor_price + SELL_RISE_USD (not avg_entry * (1+SELL_PCT))
-    const rise = Number(p.sell_rise_usd ?? 0);
-
+    // Sell target shown as anchor + SELL_RISE_USD
     const rise = Number(p.sell_rise_usd ?? 0);
 
     if (p.sell_target == null) {
@@ -788,17 +751,13 @@ async function fetchPosition() {
         title: `Sell Target (+$${rise.toFixed(2)} from anchor)`,
       });
     }
-
-    // Optional: if you want to verify anchor is being computed, uncomment:
-    // console.log("anchor_price:", p.anchor_price, "sell_target:", p.sell_target, "rise:", p.sell_rise_usd);
-
   } catch (e) {
     console.error("fetchPosition failed", e);
   }
 }
 
 // ----------------------------
-// Latest closed bar (snapped to minute)
+// Latest closed bar
 // ----------------------------
 async function fetchLatestBar() {
   try {
@@ -831,6 +790,7 @@ async function fetchLatestBar() {
       setReadoutFromBar(lastBarTime, lastBarObj);
 
       loadMarkers().catch(() => {});
+      loadGroupPerformance().catch(() => {});
     }
 
     const age = nowEpochSec() - barTimeMin;
@@ -849,11 +809,11 @@ async function fetchLatestBar() {
 const LATEST_BAR_POLL_MS = 5000;
 
 (async function boot() {
-  await loadHistory(true);   // fit once on boot
+  await loadHistory(true);
   await loadMarkers();
   await fetchPosition();
   await fetchLatestBar();
-  await loadGroupPerformance();   // <-- RUN ON BOOT
+  await loadGroupPerformance();
 })();
 
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
@@ -861,8 +821,5 @@ setInterval(fetchPosition, 2000);
 
 setInterval(() => {
   loadMarkers();
-  loadGroupPerformance();   // <-- REFRESH EVERY 5s
+  loadGroupPerformance();
 }, 5000);
-
-// IMPORTANT: do NOT keep reloading history every 60s
-// setInterval(loadHistory, 60000);
