@@ -16,9 +16,7 @@
         overflow: hidden;
       }
 
-      /* ----------------------------
-         Top bar
-      ---------------------------- */
+      /* Top bar */
       #topbar {
         height: 48px;
         box-sizing: border-box;
@@ -36,26 +34,22 @@
         white-space: nowrap;
       }
 
-      /* ----------------------------
-         Main layout
-      ---------------------------- */
+      /* Main layout */
       #chartWrap {
         position: relative;
-        height: calc(100% - 48px); /* subtract topbar */
+        height: calc(100% - 48px);
       }
 
-      /* Chart area (reserve space for bottom table) */
+      /* Chart area */
       #chart {
         position: absolute;
         top: 0;
         left: 0;
         right: 0;
-        bottom: 220px; /* MUST match groupTableWrap height */
+        bottom: 220px;
       }
 
-      /* ----------------------------
-         Bottom group table (REAL TABLE)
-      ---------------------------- */
+      /* Bottom group table */
       #groupTableWrap {
         position: absolute;
         left: 0;
@@ -71,14 +65,12 @@
         font-size: 12px;
       }
 
-      /* The table itself */
       #groupTable {
         width: 100%;
         border-collapse: collapse;
         white-space: nowrap;
       }
 
-      /* Sticky header */
       #groupTable thead th {
         position: sticky;
         top: 0;
@@ -99,17 +91,11 @@
         background: rgba(255,255,255,0.03);
       }
 
-      /* Optional: subtle alignment helpers */
-      .num { text-align: right; }
-      .dim { opacity: 0.85; }
-
-      /* ----------------------------
-         Floating debug/JSON box
-      ---------------------------- */
+      /* Floating debug box */
       #bar {
         position: absolute;
         right: 12px;
-        bottom: 232px; /* keep above group table (220) + padding */
+        bottom: 232px;
         width: 360px;
         max-height: 40%;
         overflow: auto;
@@ -134,7 +120,6 @@
 
       <div class="spacer"></div>
 
-      <!-- Group Performance mini-summary -->
       <span id="gp">GP: (loading…)</span>
     </div>
 
@@ -142,7 +127,6 @@
       <div id="chart"></div>
       <pre id="bar"></pre>
 
-      <!-- Bottom table area -->
       <div id="groupTableWrap">
         <table id="groupTable"></table>
       </div>
