@@ -145,6 +145,79 @@ def _anchor_from_recent_fills(api: REST, symbol: str, lookback: int = 500):
 
     return (anchor_price, anchor_time)
 
+from datetime import datetime, timezone
+from typing import Optional, Tuple
+
+def _parse_dt(x) -> Optional[datetime]:
+    if x is None:
+        return None
+    if isinstance(x, datetime):
+        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+    try:
+        s = str(x).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+def _sell_rise_usd() -> float:
+    try:
+        return float(os.getenv("SELL_RISE_USD", "2") or "2")
+    except Exception:
+        return 2.0
+
+def _anchor_from_recent_fills(api, symbol: str, lookback: int = 500) -> Tuple[Optional[float], Optional[datetime]]:
+    """
+    Anchor = first BUY price of the currently-open cycle:
+    - Sort fills oldest->newest
+    - Track running position qty
+    - When running qty goes 0 -> >0 on a BUY, set anchor to that BUY price
+    - When qty returns to 0, cycle ends and next BUY starts a new anchor
+    """
+    try:
+        acts = api.list_activities(activity_types="FILL", limit=lookback)
+    except Exception:
+        return (None, None)
+
+    fills = []
+    for a in acts or []:
+        try:
+            if (getattr(a, "symbol", "") or "").upper() != symbol.upper():
+                continue
+
+            side = (getattr(a, "side", "") or "").lower()
+            qty = float(getattr(a, "qty", 0) or 0)
+            px  = float(getattr(a, "price", 0) or 0)
+
+            dt = _parse_dt(
+                getattr(a, "transaction_time", None)
+                or getattr(a, "time", None)
+                or getattr(a, "filled_at", None)
+            )
+
+            if side not in ("buy", "sell") or qty <= 0 or px <= 0 or dt is None:
+                continue
+
+            fills.append((dt, side, qty, px))
+        except Exception:
+            continue
+
+    fills.sort(key=lambda x: x[0])
+
+    running = 0.0
+    anchor_price = None
+    anchor_time = None
+
+    for dt, side, qty, px in fills:
+        if side == "buy":
+            if running <= 0:
+                anchor_price = px
+                anchor_time = dt
+            running += qty
+        else:
+            running = max(0.0, running - qty)
+
+    return (anchor_price, anchor_time)
 
 # ============================================================
 # Routes
@@ -463,8 +536,9 @@ def bars(limit: int = 300):
 def position():
     api = _alpaca()
     symbol = _symbol()
-    sell_rise_usd = _sell_rise_usd()
+    rise = _sell_rise_usd()
 
+    # current position
     try:
         pos = api.get_position(symbol)
     except Exception:
@@ -475,21 +549,21 @@ def position():
             "avg_entry": None,
             "anchor_price": None,
             "anchor_time_utc": None,
-            "sell_rise_usd": sell_rise_usd,
+            "sell_rise_usd": rise,
             "sell_target": None,
         }
 
-    qty = float(pos.qty)
+    qty = float(pos.qty or 0)
     avg_entry = float(pos.avg_entry_price) if qty > 0 else None
 
     anchor_price = None
     anchor_time = None
+    sell_target = None
 
     if qty > 0:
-        ap, at = _anchor_from_recent_fills(api, symbol, lookback=500)
-        anchor_price, anchor_time = ap, at
-
-    sell_target = (anchor_price + sell_rise_usd) if (qty > 0 and anchor_price is not None) else None
+        anchor_price, anchor_time = _anchor_from_recent_fills(api, symbol, lookback=1000)
+        if anchor_price is not None:
+            sell_target = float(anchor_price + rise)
 
     return {
         "ok": True,
@@ -498,13 +572,12 @@ def position():
         "avg_entry": avg_entry,
         "anchor_price": anchor_price,
         "anchor_time_utc": anchor_time.isoformat() if anchor_time else None,
-        "sell_rise_usd": sell_rise_usd,
+        "sell_rise_usd": rise,
         "sell_target": sell_target,
-        "market_price": float(pos.current_price),
-        "unrealized_pl": float(pos.unrealized_pl),
-        "unrealized_plpc": float(pos.unrealized_plpc),
+        "market_price": float(getattr(pos, "current_price", 0) or 0),
+        "unrealized_pl": float(getattr(pos, "unrealized_pl", 0) or 0),
+        "unrealized_plpc": float(getattr(pos, "unrealized_plpc", 0) or 0),
     }
-
 
 # ============================================================
 # Fills (Closed orders w/ fills, filtered to symbol)
