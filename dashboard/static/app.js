@@ -778,10 +778,16 @@ async function fetchPosition() {
     // NEW: sell target is anchor_price + SELL_RISE_USD (not avg_entry * (1+SELL_PCT))
     const rise = Number(p.sell_rise_usd ?? 0);
 
-    sellTargetLine.applyOptions({
-      price: p.sell_target,
-      title: `Sell Target (+$${Number(p.sell_rise_usd).toFixed(2)} from anchor)`,
-    });
+    const rise = Number(p.sell_rise_usd ?? 0);
+
+    if (p.sell_target == null) {
+      sellTargetLine.applyOptions({ price: 0, title: "Sell Target" });
+    } else {
+      sellTargetLine.applyOptions({
+        price: Number(p.sell_target),
+        title: `Sell Target (+$${rise.toFixed(2)} from anchor)`,
+      });
+    }
 
     // Optional: if you want to verify anchor is being computed, uncomment:
     // console.log("anchor_price:", p.anchor_price, "sell_target:", p.sell_target, "rise:", p.sell_rise_usd);
