@@ -274,7 +274,13 @@ def group_performance(limit: int = 25):
             rows = cur.fetchall()
 
     return {"ok": True, "symbol": symbol, "rows": rows}
+    
+from fastapi.responses import Response
 
+@app.get("/favicon.ico")
+def favicon():
+    # No favicon provided; return "No Content" so browser stops complaining
+    return Response(status_code=204)
 
 # ============================================================
 # Latest Bar (last CLOSED bar; cached)
