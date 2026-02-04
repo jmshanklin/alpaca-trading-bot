@@ -772,8 +772,20 @@ async function fetchLatestBar() {
     lastSymbol = data.symbol || lastSymbol;
     lastFeed = data.feed || lastFeed;
 
-    const barTime = Math.floor(new Date(data.t).getTime() / 1000);
-    const barTimeMin = Math.floor(barTime / 60) * 60;
+    let barTimeSec;
+
+    // Normalize backend time into epoch seconds
+    if (typeof data.t === "number") {
+      barTimeSec = data.t;
+    } else if (typeof data.t === "string") {
+      barTimeSec = Math.floor(new Date(data.t).getTime() / 1000);
+    } else if (data.t && typeof data.t.timestamp === "number") {
+      barTimeSec = data.t.timestamp;
+    } else {
+      return; // can't use this bar
+    }
+    
+    const barTimeMin = Math.floor(barTimeSec / 60) * 60;
 
     if (barTimeMin !== lastBarTime) {
       lastBarTime = barTimeMin;
