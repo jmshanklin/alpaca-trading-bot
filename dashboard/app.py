@@ -144,12 +144,11 @@ def home():
 def health():
     return {"ok": True}
 
+from fastapi.responses import Response
 
 @app.get("/favicon.ico")
 def favicon():
-    # Stops the browser console 404 spam
     return Response(status_code=204)
-
 
 @app.get("/position")
 def position():
