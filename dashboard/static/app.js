@@ -4,7 +4,7 @@ const anchorGrid = document.getElementById("anchorGrid");
 const rawEl = document.getElementById("raw");
 const refreshBtn = document.getElementById("refreshBtn");
 
-function setStatus(t, ok=true) {
+function setStatus(t, ok = true) {
   statusEl.textContent = t;
   statusEl.className = ok ? "ok" : "bad";
 }
@@ -48,7 +48,7 @@ async function refresh() {
       row("unrealized_pl", money(p.unrealized_pl)) +
       row("unrealized_plpc", pct(p.unrealized_plpc));
 
-    // Anchor block (this is what matters for your strategy)
+    // Anchor block
     anchorGrid.innerHTML =
       row("anchor_price", money(p.anchor_price)) +
       row("anchor_time_utc", p.anchor_time_utc || "—") +
@@ -63,7 +63,6 @@ async function refresh() {
     } else {
       setStatus(`position open — sell target ${money(p.sell_target)}`, true);
     }
-
   } catch (e) {
     console.error(e);
     setStatus("exception", false);
@@ -72,6 +71,5 @@ async function refresh() {
 
 refreshBtn.onclick = refresh;
 
-// auto-refresh
 refresh();
 setInterval(refresh, 5000);
