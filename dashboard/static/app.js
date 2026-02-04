@@ -1,11 +1,12 @@
 // ------------------------------------
-// Alpaca Dashboard - app.js (CLEAN, CORRECTED, UPGRADED)
+// Alpaca Dashboard - app.js (CLEAN, UPDATED)
 // Chicago/Central time + crosshair time label + OHLC readout
 // + Avg Entry line (gold) + Sell Target line (blue)
 // + BUY/SELL markers (from /fills)
 // + BUY numbering resets ONLY when position size returns to ZERO
-// + Right padding controls (Pad +/-) to pull candles away from price scale
+// + Right padding controls (Pad +/-)
 // + Ruler tool (measure price/time between 2 points)
+// + HARD TIME NORMALIZATION (fixes "Cannot update oldest data")
 // ------------------------------------
 
 const statusEl = document.getElementById("status");
@@ -17,9 +18,8 @@ const chartEl = document.getElementById("chart");
 // ----------------------------
 let HISTORY_MODE = false;
 
-// Tune these:
 const LIVE_BAR_LIMIT = 300;
-const HISTORY_BAR_LIMIT = 1500; // try 1500 first; later 3000 if Render/browser can handle it
+const HISTORY_BAR_LIMIT = 1500;
 
 // ----------------------------
 // Helpers
@@ -30,6 +30,23 @@ function setStatus(text) {
 
 function nowEpochSec() {
   return Math.floor(Date.now() / 1000);
+}
+
+// Convert ANY time format into epoch seconds (or null)
+function normalizeTimeToSec(t) {
+  if (typeof t === "number") {
+    // milliseconds -> seconds
+    if (t > 2_000_000_000_000) return Math.floor(t / 1000);
+    return t;
+  }
+  if (typeof t === "string") {
+    const s = Math.floor(new Date(t).getTime() / 1000);
+    return Number.isFinite(s) ? s : null;
+  }
+  if (t && typeof t.timestamp === "number") {
+    return t.timestamp;
+  }
+  return null;
 }
 
 // Status display: date + time in Chicago
@@ -62,8 +79,8 @@ function isMarketOpenChicagoNow() {
   if (!isWeekday) return false;
 
   const mins = hour * 60 + minute;
-  const open = 8 * 60 + 30;  // 08:30
-  const close = 15 * 60 + 0; // 15:00
+  const open = 8 * 60 + 30;
+  const close = 15 * 60;
   return mins >= open && mins < close;
 }
 
@@ -91,7 +108,7 @@ async function loadGroupPerformance() {
 
     if (!j || j.ok === false) {
       gpEl.textContent = "GP: (error)";
-      tableEl.innerHTML = `<tbody><tr><td>${(j && j.error) ? j.error : "Unknown error"}</td></tr></tbody>`;
+      tableEl.innerHTML = `<tbody><tr><td>${j?.error || "Unknown error"}</td></tr></tbody>`;
       return;
     }
 
@@ -100,7 +117,6 @@ async function loadGroupPerformance() {
     const openCount = rows.filter(x => (x.cycle_status || "").toUpperCase() === "OPEN").length;
     const closedCount = rows.filter(x => (x.cycle_status || "").toUpperCase() === "CLOSED").length;
 
-    // backend sorts DESC by cycle_last_utc -> rows[0] is most recent
     const lastClosed = rows.find(x => (x.cycle_status || "").toUpperCase() === "CLOSED") || null;
     const lastPnl = lastClosed && typeof lastClosed.pnl === "number" ? lastClosed.pnl : null;
     const lastPct = lastClosed && typeof lastClosed.pnl_pct === "number" ? lastClosed.pnl_pct : null;
@@ -137,7 +153,6 @@ async function loadGroupPerformance() {
       html += "<tr>";
       for (const col of columns) {
         let val = x[col];
-
         if (val == null) val = "";
 
         if (typeof val === "number") {
@@ -145,7 +160,6 @@ async function loadGroupPerformance() {
           else if (col.includes("price") || col === "pnl") val = val.toFixed(2);
           else val = String(val);
         }
-
         html += `<td>${val}</td>`;
       }
       html += "</tr>";
@@ -205,15 +219,10 @@ const chart = LightweightCharts.createChart(chartEl, {
   },
   localization: {
     timeFormatter: (time) => {
-      const tsSec = typeof time === "number" ? time : time?.timestamp;
-      const t = typeof tsSec === "number" ? tsSec : 0;
-      return new Intl.DateTimeFormat("en-US", {
-        timeZone: "America/Chicago",
-        month: "numeric",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      }).format(new Date(t * 1000));
+      const tsSec = normalizeTimeToSec(time);
+      return tsSec
+        ? fmtChicago(tsSec)
+        : "—";
     },
   },
 });
@@ -227,7 +236,7 @@ const candles = chart.addSeries(LightweightCharts.CandlestickSeries, {
   wickDownColor: "#ef5350",
 });
 
-// Markers support (v4 uses series.setMarkers, v5 uses createSeriesMarkers)
+// Markers support
 const markersLayer =
   typeof candles.setMarkers === "function"
     ? { set: (ms) => candles.setMarkers(ms) }
@@ -258,7 +267,7 @@ const sellTargetLine = candles.createPriceLine({
 });
 
 // ----------------------------
-// UI: History Mode toggle button
+// UI: History Mode toggle
 // ----------------------------
 const toggleBtn = document.createElement("button");
 toggleBtn.textContent = "History: OFF";
@@ -273,7 +282,7 @@ toggleBtn.title = "Toggle History Mode (loads more 1-min bars)";
 statusEl.parentElement.appendChild(toggleBtn);
 
 // ----------------------------
-// UI: Right-padding controls
+// Right padding controls
 // ----------------------------
 let RIGHT_PAD = 12;
 
@@ -290,7 +299,6 @@ padMinusBtn.style.border = "1px solid #1f2430";
 padMinusBtn.style.background = "#0e1117";
 padMinusBtn.style.color = "#d1d4dc";
 padMinusBtn.style.cursor = "pointer";
-padMinusBtn.title = "Decrease right padding";
 
 const padPlusBtn = document.createElement("button");
 padPlusBtn.textContent = "Pad +";
@@ -301,7 +309,6 @@ padPlusBtn.style.border = "1px solid #1f2430";
 padPlusBtn.style.background = "#0e1117";
 padPlusBtn.style.color = "#d1d4dc";
 padPlusBtn.style.cursor = "pointer";
-padPlusBtn.title = "Increase right padding";
 
 statusEl.parentElement.appendChild(padMinusBtn);
 statusEl.parentElement.appendChild(padPlusBtn);
@@ -310,13 +317,11 @@ padMinusBtn.onclick = () => {
   RIGHT_PAD = Math.max(0, RIGHT_PAD - 2);
   applyRightPad();
 };
-
 padPlusBtn.onclick = () => {
   RIGHT_PAD = Math.min(80, RIGHT_PAD + 2);
   applyRightPad();
 };
 
-// Keyboard shortcuts: [ = less pad, ] = more pad
 window.addEventListener("keydown", (e) => {
   if (e.key === "[") {
     RIGHT_PAD = Math.max(0, RIGHT_PAD - 2);
@@ -330,21 +335,12 @@ window.addEventListener("keydown", (e) => {
 
 applyRightPad();
 
-toggleBtn.onclick = async () => {
-  HISTORY_MODE = !HISTORY_MODE;
-  toggleBtn.textContent = HISTORY_MODE ? "History: ON" : "History: OFF";
-
-  await loadHistory(true);
-  await loadMarkers();
-  await fetchPosition();
-};
-
 // ----------------------------
-// RULER TOOL
+// Ruler Tool
 // ----------------------------
 let RULER_MODE = false;
-let rulerA = null;          // { time, price }
-let rulerB = null;          // { time, price }
+let rulerA = null;
+let rulerB = null;
 let rulerLocked = false;
 
 const rulerLine = chart.addSeries(LightweightCharts.LineSeries, {
@@ -362,7 +358,6 @@ rulerBox.style.padding = "6px 10px";
 rulerBox.style.borderRadius = "8px";
 rulerBox.style.border = "1px solid #1f2430";
 rulerBox.style.background = "rgba(0,0,0,0.65)";
-rulerBox.style.backdropFilter = "blur(6px)";
 rulerBox.style.fontFamily =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
 rulerBox.style.fontSize = "12px";
@@ -380,7 +375,6 @@ rulerBtn.style.border = "1px solid #1f2430";
 rulerBtn.style.background = "#0e1117";
 rulerBtn.style.color = "#d1d4dc";
 rulerBtn.style.cursor = "pointer";
-rulerBtn.title = "Toggle ruler tool (click 2 points to measure)";
 statusEl.parentElement.appendChild(rulerBtn);
 
 function clearRuler() {
@@ -393,30 +387,19 @@ function clearRuler() {
 
 rulerBtn.onclick = () => {
   RULER_MODE = !RULER_MODE;
-
   rulerBtn.textContent = RULER_MODE ? "Ruler: ON" : "Ruler: OFF";
   rulerBox.style.display = RULER_MODE ? "block" : "none";
-
-  if (!RULER_MODE) {
-    clearRuler();
-    rulerBox.textContent = "Ruler: —";
-  } else {
-    clearRuler();
-    rulerBox.textContent = "Ruler: click point A…";
-  }
+  clearRuler();
 };
 
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && RULER_MODE) {
-    clearRuler();
-  }
+  if (e.key === "Escape" && RULER_MODE) clearRuler();
 });
 
 function pointFromParam(param) {
   if (!param || !param.time) return null;
-
-  const tsSec = typeof param.time === "number" ? param.time : param.time?.timestamp;
-  if (!tsSec) return null;
+  const ts = normalizeTimeToSec(param.time);
+  if (!ts) return null;
 
   const sd = param.seriesData?.get?.(candles);
   if (!sd) return null;
@@ -424,7 +407,7 @@ function pointFromParam(param) {
   const price = Number(sd.close);
   if (!Number.isFinite(price)) return null;
 
-  return { time: tsSec, price };
+  return { time: ts, price };
 }
 
 function updateRulerVisuals() {
@@ -437,7 +420,6 @@ function updateRulerVisuals() {
 
   const dp = rulerB.price - rulerA.price;
   const pct = (dp / rulerA.price) * 100;
-
   const dtSec = Math.abs(rulerB.time - rulerA.time);
   const dtMin = dtSec / 60;
   const bars = Math.round(dtMin);
@@ -448,7 +430,7 @@ function updateRulerVisuals() {
 }
 
 // ----------------------------
-// BUY/SELL markers
+// Markers
 // ----------------------------
 let lastMarkersHash = "";
 
@@ -469,17 +451,16 @@ async function loadMarkers() {
 
     let runningQty = 0;
     let buyCount = 0;
-
     const markers = [];
 
     for (const f of fills) {
-      const ts = Math.floor(new Date(f.filled_at).getTime() / 1000);
-      const t = minuteFloor(ts);
+      const ts = normalizeTimeToSec(f.filled_at);
+      if (!ts) continue;
 
+      const t = minuteFloor(ts);
       const side = (f.side || "").toLowerCase();
       const isBuy = side === "buy";
       const isSell = side === "sell";
-
       const qty = Number(f.filled_qty || 0);
       const px = Number(f.filled_avg_price || 0);
 
@@ -501,7 +482,6 @@ async function loadMarkers() {
 
       if (isSell) {
         runningQty = Math.max(0, runningQty - qty);
-
         markers.push({
           time: t,
           position: "aboveBar",
@@ -509,7 +489,6 @@ async function loadMarkers() {
           color: "#ef4444",
           text: `S ${qty}@${px.toFixed(2)}`,
         });
-
         if (runningQty === 0) buyCount = 0;
       }
     }
@@ -527,7 +506,7 @@ async function loadMarkers() {
 }
 
 // ----------------------------
-// Resize Observer
+// Resize
 // ----------------------------
 function resizeChart() {
   chart.applyOptions({
@@ -543,7 +522,7 @@ requestAnimationFrame(resizeChart);
 setTimeout(resizeChart, 250);
 
 // ----------------------------
-// OHLC readout (top-left overlay)
+// OHLC Readout
 // ----------------------------
 const readout = document.createElement("div");
 readout.style.position = "absolute";
@@ -554,12 +533,10 @@ readout.style.padding = "6px 8px";
 readout.style.borderRadius = "6px";
 readout.style.border = "1px solid #1f2430";
 readout.style.background = "rgba(0,0,0,0.65)";
-readout.style.backdropFilter = "blur(6px)";
 readout.style.fontFamily =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
 readout.style.fontSize = "16px";
 readout.style.fontWeight = "600";
-readout.style.letterSpacing = "0.5px";
 readout.style.pointerEvents = "none";
 readout.textContent = "—";
 chartEl.parentElement.appendChild(readout);
@@ -575,7 +552,7 @@ function setReadoutFromBar(tsSec, bar) {
 }
 
 // ----------------------------
-// State + Debug
+// State
 // ----------------------------
 let lastBarTime = null;
 let lastBarObj = null;
@@ -586,58 +563,6 @@ let historyCount = 0;
 const debugState = {};
 
 // ----------------------------
-// Crosshair subscription
-// ----------------------------
-chart.subscribeCrosshairMove((param) => {
-  if (!param || !param.time) {
-    if (lastBarTime && lastBarObj) setReadoutFromBar(lastBarTime, lastBarObj);
-    return;
-  }
-
-  const tsSec = typeof param.time === "number" ? param.time : param.time?.timestamp;
-  const seriesData = param.seriesData?.get?.(candles);
-  if (!seriesData) return;
-
-  setReadoutFromBar(tsSec, seriesData);
-
-  if (RULER_MODE && rulerA && !rulerLocked) {
-    const pt = pointFromParam(param);
-    if (pt) {
-      rulerB = pt;
-      updateRulerVisuals();
-    }
-  }
-});
-
-// ----------------------------
-// Ruler clicks
-// ----------------------------
-chart.subscribeClick((param) => {
-  if (!RULER_MODE) return;
-
-  const pt = pointFromParam(param);
-  if (!pt) return;
-
-  if (rulerA && rulerB && rulerLocked) {
-    clearRuler();
-    rulerA = pt;
-    rulerBox.textContent = "Ruler: move to preview B, click to lock…";
-    return;
-  }
-
-  if (!rulerA) {
-    rulerA = pt;
-    rulerLocked = false;
-    rulerBox.textContent = "Ruler: move to preview B, click to lock…";
-    return;
-  }
-
-  rulerB = pt;
-  rulerLocked = true;
-  updateRulerVisuals();
-});
-
-// ----------------------------
 // Load History
 // ----------------------------
 async function loadHistory(refit = false) {
@@ -645,7 +570,6 @@ async function loadHistory(refit = false) {
 
   try {
     const limit = HISTORY_MODE ? HISTORY_BAR_LIMIT : LIVE_BAR_LIMIT;
-
     const r = await fetch(`/bars?limit=${limit}`, { cache: "no-store" });
     const data = await r.json();
 
@@ -666,39 +590,30 @@ async function loadHistory(refit = false) {
 
     lastSymbol = data.symbol;
     lastFeed = data.feed;
-    historyCount = data.bars.length;
 
-    // Normalize bars to epoch seconds in `time`
-    const bars = (data.bars || []).map((b) => {
-      let t = b.time;
-
-      if (t && typeof t === "object" && typeof t.timestamp === "number") {
-        t = t.timestamp;
-      }
-
-      if (typeof t === "string") {
-        const parsed = Math.floor(new Date(t).getTime() / 1000);
-        if (Number.isFinite(parsed)) t = parsed;
-      }
-
-      if (typeof t === "number" && t > 2_000_000_000_000) {
-        t = Math.floor(t / 1000);
-      }
-
-      if (typeof t === "number") {
+    const bars = (data.bars || [])
+      .map((b) => {
+        let t = normalizeTimeToSec(b.time);
+        if (!t) return null;
         t = Math.floor(t / 60) * 60;
-      }
 
-      return {
-        time: t,
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-      };
-    });
+        return {
+          time: t,
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+        };
+      })
+      .filter(Boolean);
+
+    if (!bars.length) {
+      setStatus("no valid bars");
+      return;
+    }
 
     candles.setData(bars);
+    historyCount = bars.length;
 
     if (refit) {
       chart.timeScale().fitContent();
@@ -722,7 +637,7 @@ async function loadHistory(refit = false) {
 }
 
 // ----------------------------
-// Position (avg entry + sell target)
+// Position
 // ----------------------------
 async function fetchPosition() {
   try {
@@ -740,7 +655,6 @@ async function fetchPosition() {
       title: `Avg Entry (${p.qty})`,
     });
 
-    // Sell target shown as anchor + SELL_RISE_USD
     const rise = Number(p.sell_rise_usd ?? 0);
 
     if (p.sell_target == null) {
@@ -757,7 +671,7 @@ async function fetchPosition() {
 }
 
 // ----------------------------
-// Latest closed bar
+// Latest Bar
 // ----------------------------
 async function fetchLatestBar() {
   try {
@@ -772,20 +686,10 @@ async function fetchLatestBar() {
     lastSymbol = data.symbol || lastSymbol;
     lastFeed = data.feed || lastFeed;
 
-    let barTimeSec;
+    const tNorm = normalizeTimeToSec(data.t);
+    if (!tNorm) return;
 
-    // Normalize backend time into epoch seconds
-    if (typeof data.t === "number") {
-      barTimeSec = data.t;
-    } else if (typeof data.t === "string") {
-      barTimeSec = Math.floor(new Date(data.t).getTime() / 1000);
-    } else if (data.t && typeof data.t.timestamp === "number") {
-      barTimeSec = data.t.timestamp;
-    } else {
-      return; // can't use this bar
-    }
-    
-    const barTimeMin = Math.floor(barTimeSec / 60) * 60;
+    const barTimeMin = Math.floor(tNorm / 60) * 60;
 
     if (barTimeMin !== lastBarTime) {
       lastBarTime = barTimeMin;
@@ -830,7 +734,6 @@ const LATEST_BAR_POLL_MS = 5000;
 
 setInterval(fetchLatestBar, LATEST_BAR_POLL_MS);
 setInterval(fetchPosition, 2000);
-
 setInterval(() => {
   loadMarkers();
   loadGroupPerformance();
