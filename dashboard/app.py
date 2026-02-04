@@ -476,7 +476,6 @@ def _parse_dt(x) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def _anchor_from_recent_fills(api, symbol: str, lookback: int = 500) -> Tuple[Optional[float], Optional[datetime]]:
     """
     Reconstruct the CURRENT group's anchor price:
@@ -532,6 +531,80 @@ def _anchor_from_recent_fills(api, symbol: str, lookback: int = 500) -> Tuple[Op
     # If we currently have a position but couldn't find an anchor, return None
     return (anchor_price, anchor_time)
 
+from datetime import datetime
+from typing import Optional
+
+def _sell_rise_usd() -> float:
+    # Dashboard env var (add to Render alpaca-dashboard): SELL_RISE_USD=2
+    try:
+        import os
+        return float(os.getenv("SELL_RISE_USD", "2"))
+    except Exception:
+        return 2.0
+
+def _anchor_from_fills(api, symbol: str, limit: int = 500) -> Optional[tuple[float, Optional[datetime]]]:
+    """
+    Reconstruct 'anchor' (first buy of current open cycle) from fills.
+    Cycle starts when position goes from 0 -> >0.
+    Returns: (anchor_price, anchor_time_utc) or None
+    """
+    try:
+        orders = api.list_orders(
+            status="all",
+            limit=limit,
+            nested=True,
+            direction="asc"
+        )
+    except Exception:
+        orders = []
+
+    # Collect fills-like events from orders with filled_at
+    events = []
+    for o in orders:
+        try:
+            if getattr(o, "symbol", None) != symbol:
+                continue
+            filled_at = getattr(o, "filled_at", None)
+            if not filled_at:
+                continue
+            side = (getattr(o, "side", "") or "").lower()
+            qty = float(getattr(o, "filled_qty", 0) or 0)
+            px = float(getattr(o, "filled_avg_price", 0) or 0)
+            if side not in ("buy", "sell"):
+                continue
+            if qty <= 0 or px <= 0:
+                continue
+            events.append((filled_at, side, qty, px))
+        except Exception:
+            continue
+
+    # Oldest -> newest
+    events.sort(key=lambda x: x[0])
+
+    running_qty = 0.0
+    current_anchor_price = None
+    current_anchor_time = None
+
+    for filled_at, side, qty, px in events:
+        if side == "buy":
+            # If we were flat and we buy, this begins a new cycle => anchor
+            if running_qty <= 0:
+                current_anchor_price = px
+                current_anchor_time = filled_at
+            running_qty += qty
+
+        elif side == "sell":
+            running_qty = max(0.0, running_qty - qty)
+            # If we sell to flat, cycle ended; next buy would start a new cycle
+            if running_qty <= 0:
+                current_anchor_price = None
+                current_anchor_time = None
+
+    # If we end with running_qty>0, we are in an open cycle and should have an anchor
+    if running_qty > 0 and current_anchor_price is not None:
+        return float(current_anchor_price), current_anchor_time
+
+    return None
 
 # ============================================================
 # Position Info (UPDATED: uses SELL_RISE_USD + anchor price)
@@ -540,39 +613,35 @@ def _anchor_from_recent_fills(api, symbol: str, lookback: int = 500) -> Tuple[Op
 def position():
     api = _alpaca()
     symbol = _symbol()
-
     sell_rise_usd = _sell_rise_usd()
 
-    # Keep sell_pct ONLY for backward compatibility / display if you want.
-    # It is NOT used to compute sell_target anymore.
-    try:
-        sell_pct = float(os.getenv("SELL_PCT", "0") or "0")
-    except Exception:
-        sell_pct = 0.0
-
+    # Try to get current position
     try:
         pos = api.get_position(symbol)
     except Exception:
-        # No open position
         return {
             "ok": True,
             "symbol": symbol,
             "qty": 0,
             "avg_entry": None,
             "anchor_price": None,
+            "anchor_time_utc": None,
             "sell_rise_usd": sell_rise_usd,
             "sell_target": None,
-            "sell_pct": sell_pct,
         }
 
     qty = float(pos.qty)
     avg_entry = float(pos.avg_entry_price) if qty > 0 else None
 
-    anchor_price, anchor_time = (None, None)
-    if qty > 0:
-        anchor_price, anchor_time = _anchor_from_recent_fills(api, symbol, lookback=500)
+    anchor_price = None
+    anchor_time = None
 
-    # NEW sell target logic
+    # If we have an open position, reconstruct anchor from fills/orders
+    if qty > 0:
+        anchor = _anchor_from_fills(api, symbol, limit=500)
+        if anchor:
+            anchor_price, anchor_time = anchor
+
     sell_target = (anchor_price + sell_rise_usd) if (qty > 0 and anchor_price is not None) else None
 
     return {
@@ -580,11 +649,10 @@ def position():
         "symbol": symbol,
         "qty": qty,
         "avg_entry": avg_entry,                 # keep Avg Entry line
-        "anchor_price": anchor_price,           # NEW: anchor price for the group
+        "anchor_price": anchor_price,           # NEW: anchor
         "anchor_time_utc": anchor_time.isoformat() if anchor_time else None,
         "sell_rise_usd": sell_rise_usd,         # NEW: $ rise above anchor
         "sell_target": sell_target,             # NEW: anchor + $2
-        "sell_pct": sell_pct,                   # legacy (not used for sell_target)
         "market_price": float(pos.current_price),
         "unrealized_pl": float(pos.unrealized_pl),
         "unrealized_plpc": float(pos.unrealized_plpc),
