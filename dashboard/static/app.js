@@ -4,9 +4,10 @@
 // + Avg Entry line (gold) + Sell Target line (blue)
 // + BUY/SELL markers (from /fills)
 // + BUY numbering resets ONLY when position size returns to ZERO
-// + Right padding controls (Pad +/-)
+// + Right padding controls (Pad +/-) to pull candles away from price scale
 // + Ruler tool (measure price/time between 2 points)
-// + HARD TIME NORMALIZATION (fixes "Cannot update oldest data")
+// + HARD TIME NORMALIZATION + "NUCLEAR" LAST-TIME TRACKING
+//   (fixes "Cannot update oldest data")
 // ------------------------------------
 
 const statusEl = document.getElementById("status");
@@ -49,6 +50,11 @@ function normalizeTimeToSec(t) {
   return null;
 }
 
+// Snap to minute (epoch seconds)
+function minuteFloor(tsSec) {
+  return Math.floor(tsSec / 60) * 60;
+}
+
 // Status display: date + time in Chicago
 function fmtChicago(tsSec) {
   return new Intl.DateTimeFormat("en-US", {
@@ -79,13 +85,9 @@ function isMarketOpenChicagoNow() {
   if (!isWeekday) return false;
 
   const mins = hour * 60 + minute;
-  const open = 8 * 60 + 30;
-  const close = 15 * 60;
+  const open = 8 * 60 + 30;  // 08:30
+  const close = 15 * 60 + 0; // 15:00
   return mins >= open && mins < close;
-}
-
-function minuteFloor(tsSec) {
-  return Math.floor(tsSec / 60) * 60;
 }
 
 function fmtSigned(n, decimals = 2) {
@@ -219,10 +221,8 @@ const chart = LightweightCharts.createChart(chartEl, {
   },
   localization: {
     timeFormatter: (time) => {
-      const tsSec = normalizeTimeToSec(time);
-      return tsSec
-        ? fmtChicago(tsSec)
-        : "—";
+      const ts = normalizeTimeToSec(time);
+      return ts ? fmtChicago(ts) : "—";
     },
   },
 });
@@ -335,6 +335,16 @@ window.addEventListener("keydown", (e) => {
 
 applyRightPad();
 
+// Toggle history
+toggleBtn.onclick = async () => {
+  HISTORY_MODE = !HISTORY_MODE;
+  toggleBtn.textContent = HISTORY_MODE ? "History: ON" : "History: OFF";
+
+  await loadHistory(true);
+  await loadMarkers();
+  await fetchPosition();
+};
+
 // ----------------------------
 // Ruler Tool
 // ----------------------------
@@ -358,6 +368,7 @@ rulerBox.style.padding = "6px 10px";
 rulerBox.style.borderRadius = "8px";
 rulerBox.style.border = "1px solid #1f2430";
 rulerBox.style.background = "rgba(0,0,0,0.65)";
+rulerBox.style.backdropFilter = "blur(6px)";
 rulerBox.style.fontFamily =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
 rulerBox.style.fontSize = "12px";
@@ -375,6 +386,7 @@ rulerBtn.style.border = "1px solid #1f2430";
 rulerBtn.style.background = "#0e1117";
 rulerBtn.style.color = "#d1d4dc";
 rulerBtn.style.cursor = "pointer";
+rulerBtn.title = "Toggle ruler tool (click 2 points to measure)";
 statusEl.parentElement.appendChild(rulerBtn);
 
 function clearRuler() {
@@ -390,6 +402,7 @@ rulerBtn.onclick = () => {
   rulerBtn.textContent = RULER_MODE ? "Ruler: ON" : "Ruler: OFF";
   rulerBox.style.display = RULER_MODE ? "block" : "none";
   clearRuler();
+  rulerBox.textContent = RULER_MODE ? "Ruler: click point A…" : "Ruler: —";
 };
 
 window.addEventListener("keydown", (e) => {
@@ -420,6 +433,7 @@ function updateRulerVisuals() {
 
   const dp = rulerB.price - rulerA.price;
   const pct = (dp / rulerA.price) * 100;
+
   const dtSec = Math.abs(rulerB.time - rulerA.time);
   const dtMin = dtSec / 60;
   const bars = Math.round(dtMin);
@@ -430,7 +444,9 @@ function updateRulerVisuals() {
 }
 
 // ----------------------------
-// Markers
+// BUY/SELL markers (from /fills)
+// - BUYs numbered B1, B2, B3...
+// - RESET numbering ONLY when position size returns to 0
 // ----------------------------
 let lastMarkersHash = "";
 
@@ -451,6 +467,7 @@ async function loadMarkers() {
 
     let runningQty = 0;
     let buyCount = 0;
+
     const markers = [];
 
     for (const f of fills) {
@@ -461,6 +478,7 @@ async function loadMarkers() {
       const side = (f.side || "").toLowerCase();
       const isBuy = side === "buy";
       const isSell = side === "sell";
+
       const qty = Number(f.filled_qty || 0);
       const px = Number(f.filled_avg_price || 0);
 
@@ -482,6 +500,7 @@ async function loadMarkers() {
 
       if (isSell) {
         runningQty = Math.max(0, runningQty - qty);
+
         markers.push({
           time: t,
           position: "aboveBar",
@@ -489,6 +508,7 @@ async function loadMarkers() {
           color: "#ef4444",
           text: `S ${qty}@${px.toFixed(2)}`,
         });
+
         if (runningQty === 0) buyCount = 0;
       }
     }
@@ -506,7 +526,7 @@ async function loadMarkers() {
 }
 
 // ----------------------------
-// Resize
+// Resize Observer
 // ----------------------------
 function resizeChart() {
   chart.applyOptions({
@@ -522,7 +542,7 @@ requestAnimationFrame(resizeChart);
 setTimeout(resizeChart, 250);
 
 // ----------------------------
-// OHLC Readout
+// OHLC readout (top-left overlay)
 // ----------------------------
 const readout = document.createElement("div");
 readout.style.position = "absolute";
@@ -533,10 +553,12 @@ readout.style.padding = "6px 8px";
 readout.style.borderRadius = "6px";
 readout.style.border = "1px solid #1f2430";
 readout.style.background = "rgba(0,0,0,0.65)";
+readout.style.backdropFilter = "blur(6px)";
 readout.style.fontFamily =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
 readout.style.fontSize = "16px";
 readout.style.fontWeight = "600";
+readout.style.letterSpacing = "0.5px";
 readout.style.pointerEvents = "none";
 readout.textContent = "—";
 chartEl.parentElement.appendChild(readout);
@@ -552,15 +574,68 @@ function setReadoutFromBar(tsSec, bar) {
 }
 
 // ----------------------------
-// State
+// State (NUCLEAR TIME TRACKING)
 // ----------------------------
-let lastBarTime = null;
+let lastBarTimeSec = null; // ALWAYS numeric epoch seconds (snapped to minute)
 let lastBarObj = null;
 let lastSymbol = "—";
 let lastFeed = "—";
 let historyCount = 0;
 
 const debugState = {};
+
+// ----------------------------
+// Crosshair subscription
+// ----------------------------
+chart.subscribeCrosshairMove((param) => {
+  if (!param || !param.time) {
+    if (lastBarTimeSec && lastBarObj) setReadoutFromBar(lastBarTimeSec, lastBarObj);
+    return;
+  }
+
+  const tsSec = normalizeTimeToSec(param.time);
+  if (!tsSec) return;
+
+  const seriesData = param.seriesData?.get?.(candles);
+  if (!seriesData) return;
+
+  setReadoutFromBar(tsSec, seriesData);
+
+  // Ruler live preview
+  if (RULER_MODE && rulerA && !rulerLocked) {
+    const pt = pointFromParam(param);
+    if (pt) {
+      rulerB = pt;
+      updateRulerVisuals();
+    }
+  }
+});
+
+// Ruler clicks
+chart.subscribeClick((param) => {
+  if (!RULER_MODE) return;
+
+  const pt = pointFromParam(param);
+  if (!pt) return;
+
+  if (rulerA && rulerB && rulerLocked) {
+    clearRuler();
+    rulerA = pt;
+    rulerBox.textContent = "Ruler: move to preview B, click to lock…";
+    return;
+  }
+
+  if (!rulerA) {
+    rulerA = pt;
+    rulerLocked = false;
+    rulerBox.textContent = "Ruler: move to preview B, click to lock…";
+    return;
+  }
+
+  rulerB = pt;
+  rulerLocked = true;
+  updateRulerVisuals();
+});
 
 // ----------------------------
 // Load History
@@ -579,7 +654,7 @@ async function loadHistory(refit = false) {
       feed: data.feed,
       bars: data.bars?.length || 0,
       mode: HISTORY_MODE ? "HISTORY" : "LIVE",
-      limit,
+      limit
     };
     barEl.textContent = JSON.stringify(debugState, null, 2);
 
@@ -591,18 +666,19 @@ async function loadHistory(refit = false) {
     lastSymbol = data.symbol;
     lastFeed = data.feed;
 
+    // Sanitize ALL bars to numeric epoch seconds
     const bars = (data.bars || [])
       .map((b) => {
-        let t = normalizeTimeToSec(b.time);
-        if (!t) return null;
-        t = Math.floor(t / 60) * 60;
+        const t0 = normalizeTimeToSec(b.time);
+        if (!t0) return null;
+        const t = minuteFloor(t0);
 
         return {
           time: t,
-          open: b.open,
-          high: b.high,
-          low: b.low,
-          close: b.close,
+          open: Number(b.open),
+          high: Number(b.high),
+          low: Number(b.low),
+          close: Number(b.close),
         };
       })
       .filter(Boolean);
@@ -615,20 +691,21 @@ async function loadHistory(refit = false) {
     candles.setData(bars);
     historyCount = bars.length;
 
+    // Track OUR OWN numeric last time (do NOT trust chart)
+    const last = bars[bars.length - 1];
+    lastBarTimeSec = Number(last.time);
+    lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
+    setReadoutFromBar(lastBarTimeSec, lastBarObj);
+
     if (refit) {
       chart.timeScale().fitContent();
       applyRightPad();
     }
 
-    const last = bars[bars.length - 1];
-    lastBarTime = last.time;
-    lastBarObj = { open: last.open, high: last.high, low: last.low, close: last.close };
-    setReadoutFromBar(lastBarTime, lastBarObj);
-
     resizeChart();
 
     setStatus(
-      `${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(last.time)} | ${HISTORY_MODE ? "HISTORY" : "LIVE"}`
+      `${lastSymbol} ${lastFeed} | bars: ${historyCount} | last: ${fmtChicago(lastBarTimeSec)} | ${HISTORY_MODE ? "HISTORY" : "LIVE"}`
     );
   } catch (e) {
     console.error("loadHistory error:", e);
@@ -637,7 +714,7 @@ async function loadHistory(refit = false) {
 }
 
 // ----------------------------
-// Position
+// Position (avg entry + sell target)
 // ----------------------------
 async function fetchPosition() {
   try {
@@ -665,13 +742,14 @@ async function fetchPosition() {
         title: `Sell Target (+$${rise.toFixed(2)} from anchor)`,
       });
     }
+
   } catch (e) {
     console.error("fetchPosition failed", e);
   }
 }
 
 // ----------------------------
-// Latest Bar
+// Latest closed bar (snapped to minute)
 // ----------------------------
 async function fetchLatestBar() {
   try {
@@ -686,28 +764,35 @@ async function fetchLatestBar() {
     lastSymbol = data.symbol || lastSymbol;
     lastFeed = data.feed || lastFeed;
 
+    // Normalize time and snap to minute
     const tNorm = normalizeTimeToSec(data.t);
     if (!tNorm) return;
 
-    const barTimeMin = Math.floor(tNorm / 60) * 60;
+    const barTimeMin = minuteFloor(tNorm);
 
-    if (barTimeMin !== lastBarTime) {
-      lastBarTime = barTimeMin;
-      lastBarObj = { open: data.o, high: data.h, low: data.l, close: data.c };
-
-      candles.update({
-        time: barTimeMin,
-        open: data.o,
-        high: data.h,
-        low: data.l,
-        close: data.c,
-      });
-
-      setReadoutFromBar(lastBarTime, lastBarObj);
-
-      loadMarkers().catch(() => {});
-      loadGroupPerformance().catch(() => {});
+    // NUCLEAR RULE: only update if strictly newer than OUR numeric clock
+    if (lastBarTimeSec !== null && barTimeMin <= lastBarTimeSec) {
+      return;
     }
+
+    // Update internal clock FIRST
+    lastBarTimeSec = barTimeMin;
+    lastBarObj = { open: data.o, high: data.h, low: data.l, close: data.c };
+
+    // Now it's safe to update chart
+    candles.update({
+      time: barTimeMin,
+      open: data.o,
+      high: data.h,
+      low: data.l,
+      close: data.c,
+    });
+
+    setReadoutFromBar(lastBarTimeSec, lastBarObj);
+
+    // Refresh markers + GP on bar update
+    loadMarkers().catch(() => {});
+    loadGroupPerformance().catch(() => {});
 
     const age = nowEpochSec() - barTimeMin;
     const marketOpen = isMarketOpenChicagoNow();
