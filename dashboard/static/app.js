@@ -415,6 +415,7 @@ async function fetchPosition() {
   try {
     const r = await fetch("/position", { cache: "no-store" });
     const p = await r.json();
+    console.log("POSITION payload:", p);
 
     if (!p.ok || !p.qty || p.qty <= 0) {
       avgEntryLine.applyOptions({ price: 0, title: "Avg Entry" });
@@ -427,12 +428,15 @@ async function fetchPosition() {
       title: `Avg Entry (${p.qty})`
     });
 
-    if (p.sell_target) {
-      sellTargetLine.applyOptions({
-        price: p.sell_target,
-        title: `Sell Target (+$${Number(p.sell_rise_usd).toFixed(2)})`
-      });
-    }
+    if (p.sell_target == null) {
+  sellTargetLine.applyOptions({ price: 0, title: "Sell Target" });
+} else {
+  const rise = Number(p.sell_rise_usd ?? 0);
+  sellTargetLine.applyOptions({
+    price: Number(p.sell_target),
+    title: `Sell Target (+$${rise.toFixed(2)} from anchor)`,
+  });
+}
 
   } catch (e) {
     console.error("Position error", e);
