@@ -218,6 +218,70 @@ def _anchor_from_recent_fills(api, symbol: str, lookback: int = 500) -> Tuple[Op
             running = max(0.0, running - qty)
 
     return (anchor_price, anchor_time)
+    
+from datetime import datetime, timezone
+from typing import Optional, Tuple
+
+def _parse_dt(x) -> Optional[datetime]:
+    if x is None:
+        return None
+    if isinstance(x, datetime):
+        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+    try:
+        s = str(x).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+def _anchor_from_orders(api, symbol: str, limit: int = 500) -> Tuple[Optional[float], Optional[datetime]]:
+    """
+    Fallback anchor reconstruction using orders (more reliable than activities in many setups).
+    Anchor = first BUY price of the current open cycle (when position goes 0 -> >0).
+    """
+    try:
+        orders = api.list_orders(status="all", limit=limit, nested=True, direction="asc")
+    except Exception:
+        return (None, None)
+
+    events = []
+    sym = symbol.upper()
+
+    for o in orders or []:
+        try:
+            if (getattr(o, "symbol", "") or "").upper() != sym:
+                continue
+
+            filled_at = getattr(o, "filled_at", None)
+            filled_qty = float(getattr(o, "filled_qty", 0) or 0)
+            filled_px = float(getattr(o, "filled_avg_price", 0) or 0)
+            side = (getattr(o, "side", "") or "").lower()
+
+            dt = _parse_dt(filled_at)
+
+            if dt is None or side not in ("buy", "sell") or filled_qty <= 0 or filled_px <= 0:
+                continue
+
+            events.append((dt, side, filled_qty, filled_px))
+        except Exception:
+            continue
+
+    events.sort(key=lambda x: x[0])
+
+    running = 0.0
+    anchor_price = None
+    anchor_time = None
+
+    for dt, side, qty, px in events:
+        if side == "buy":
+            if running <= 0:
+                anchor_price = px
+                anchor_time = dt
+            running += qty
+        else:
+            running = max(0.0, running - qty)
+
+    return (anchor_price, anchor_time)
 
 # ============================================================
 # Routes
@@ -559,9 +623,13 @@ def position():
     anchor_price = None
     anchor_time = None
     sell_target = None
-
+    
     if qty > 0:
+        # Try activities first (if you still want), but fallback to orders if it yields null
         anchor_price, anchor_time = _anchor_from_recent_fills(api, symbol, lookback=1000)
+        if anchor_price is None:
+            anchor_price, anchor_time = _anchor_from_orders(api, symbol, limit=2000)
+    
         if anchor_price is not None:
             sell_target = float(anchor_price + rise)
 
