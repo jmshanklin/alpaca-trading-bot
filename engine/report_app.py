@@ -80,6 +80,18 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
 
     rows.sort(key=lambda r: r["time"], reverse=True)
     return rows
+    
+def find_last_tsla_sell_time(activities):
+    """Return timestamp of most recent TSLA sell fill, else None."""
+    last = None
+    for act in activities:
+        symbol = _get_attr(act, "symbol")
+        side = _get_attr(act, "side")
+        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+        if symbol == "TSLA" and side == "sell" and ts:
+            if last is None or ts > last:
+                last = ts
+    return last
 
 @app.route("/")
 def home():
@@ -125,6 +137,89 @@ def report():
         except Exception as e:
             data["recent_buy_triggers_error"] = str(e)
             data["recent_buy_triggers"] = []
+            
+        # --- Active Group (computed from activities; one-group mode) ---
+        try:
+            # pull both buys + sells so we can find last sell time
+            after2 = (datetime.utcnow() - timedelta(days=10)).isoformat() + "Z"
+            acts2 = api.get_activities(activity_types="FILL", after=after2)
+
+            last_sell_ts = find_last_tsla_sell_time(acts2)
+
+            # filter to TSLA buys AFTER last sell
+            tsla_buys_after = []
+            for act in acts2:
+                symbol = _get_attr(act, "symbol")
+                side = _get_attr(act, "side")
+                ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+                if symbol != "TSLA" or side != "buy" or not ts:
+                    continue
+                if last_sell_ts and ts <= last_sell_ts:
+                    continue
+                tsla_buys_after.append(act)
+
+            # aggregate those buys into buy-triggers
+            group_buys = aggregate_fills_by_order_id(tsla_buys_after, only_symbol="TSLA", only_side="buy")
+
+            active_group = None
+            if group_buys:
+                # anchor is the OLDEST buy trigger in the current group
+                anchor_row = group_buys[-1]
+                anchor_price = float(anchor_row["vwap"])
+
+                # strategy settings (hard-coded for now; later we read from config)
+                BUY_QTY = 12
+                SELL_OFFSET = 2.0   # sell at anchor + $2
+                FIRST_INCREMENT_COUNT = 5  # 5 buys per increment step
+
+                # count how many buy triggers are in the group
+                buys_count = len(group_buys)
+
+                # determine which increment stage we are in:
+                # stage 1 = $1 drops, stage 2 = $2 drops, stage 3 = $3 drops, etc.
+                stage = (buys_count - 1) // FIRST_INCREMENT_COUNT + 1
+                drop_increment = float(stage)  # $1, $2, $3...
+
+                buys_in_this_stage = (buys_count - 1) % FIRST_INCREMENT_COUNT + 1
+                buys_remaining_before_increment_increases = FIRST_INCREMENT_COUNT - buys_in_this_stage
+
+                # next buy trigger based on anchor and completed drops
+                # completed stage drops:
+                # stage 1 drops: 1,2,3,4,5
+                # stage 2 drops: 2,4,6,8,10
+                # etc.
+                completed_drops = 0.0
+                remaining = buys_count
+
+                # sum full stages
+                full_stages = (buys_count - 1) // FIRST_INCREMENT_COUNT
+                for s in range(1, full_stages + 1):
+                    completed_drops += s * FIRST_INCREMENT_COUNT
+
+                # add partial stage drops
+                partial = (buys_count - 1) % FIRST_INCREMENT_COUNT
+                completed_drops += stage * partial
+
+                next_buy_price = anchor_price - (completed_drops + stage)
+
+                active_group = {
+                    "group_start_time": anchor_row["time"],
+                    "anchor_vwap": round(anchor_price, 4),
+                    "sell_target": round(anchor_price + SELL_OFFSET, 4),
+                    "buys_count": buys_count,
+                    "drop_increment": drop_increment,
+                    "buys_in_this_increment": buys_in_this_stage,
+                    "buys_remaining_before_increment_increases": buys_remaining_before_increment_increases,
+                    "next_buy_price": round(next_buy_price, 4),
+                    "shares_expected": buys_count * BUY_QTY,
+                }
+
+            data["active_group"] = active_group
+            data["active_group_last_sell_time"] = (last_sell_ts.isoformat() if last_sell_ts else None)
+
+        except Exception as e:
+            data["active_group_error"] = str(e)
+            data["active_group"] = None
 
         return jsonify(data)
 
