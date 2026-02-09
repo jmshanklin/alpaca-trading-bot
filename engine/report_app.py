@@ -12,39 +12,70 @@ BASE_URL = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
 
 api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
 
-def aggregate_fills_by_order_id(activities):
-    """Group Alpaca fills into one row per order_id."""
+def _get_attr(obj, name, default=None):
+    # Works whether Alpaca returns an object or dict-like
+    try:
+        return getattr(obj, name)
+    except Exception:
+        pass
+    try:
+        return obj.get(name, default)
+    except Exception:
+        return default
+
+
+def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy"):
+    """
+    Turn Alpaca FILL activities into one row per order_id.
+    Filters to TSLA buys by default.
+    """
     grouped = {}
 
     for act in activities:
-        oid = act.order_id
-        qty = float(act.qty)
-        price = float(act.price)
-        ts = act.transaction_time
+        symbol = _get_attr(act, "symbol")
+        side = _get_attr(act, "side")
+        if only_symbol and symbol != only_symbol:
+            continue
+        if only_side and side != only_side:
+            continue
 
-        if oid not in grouped:
-            grouped[oid] = {
-                "order_id": oid,
-                "filled_qty": 0,
-                "pv": 0,
-                "ts": ts,
-                "side": act.side,
-            }
+        oid = _get_attr(act, "order_id")
+        qty = float(_get_attr(act, "qty", 0) or 0)
+        price = float(_get_attr(act, "price", 0) or 0)
+        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
 
-        grouped[oid]["filled_qty"] += qty
-        grouped[oid]["pv"] += qty * price
+        if oid is None:
+            # fallback grouping if order_id missing: time+price+qty
+            oid = f"noid:{symbol}:{side}:{ts}:{price}:{qty}"
 
-        if ts < grouped[oid]["ts"]:
-            grouped[oid]["ts"] = ts
+        g = grouped.setdefault(oid, {
+            "order_id": oid,
+            "time": ts,
+            "side": side,
+            "symbol": symbol,
+            "filled_qty": 0.0,
+            "pv": 0.0,
+        })
+
+        g["filled_qty"] += qty
+        g["pv"] += qty * price
+
+        # keep earliest time if comparable
+        if ts and g["time"] and ts < g["time"]:
+            g["time"] = ts
 
     rows = []
-    for oid, g in grouped.items():
+    for _, g in grouped.items():
+        if g["filled_qty"] <= 0:
+            continue
         vwap = g["pv"] / g["filled_qty"]
         rows.append({
-            "time": g["ts"].isoformat(),
+            "time": g["time"].isoformat() if hasattr(g["time"], "isoformat") else str(g["time"]),
+            "symbol": g["symbol"],
             "side": g["side"],
-            "filled_qty": g["filled_qty"],
-            "vwap": round(vwap, 2),
+            "filled_qty": int(round(g["filled_qty"])),
+            "vwap": round(float(vwap), 4),
+            "order_id": g["order_id"],
         })
 
     rows.sort(key=lambda r: r["time"], reverse=True)
@@ -84,6 +115,17 @@ def report():
             },
             "position": position_data,
         }
+
+        # --- Recent TSLA BUY triggers (aggregated fills) ---
+        try:
+            after = (datetime.utcnow() - timedelta(days=5)).isoformat() + "Z"
+            activities = api.get_activities(activity_types="FILL", after=after)
+            buys = aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
+            data["recent_buy_triggers"] = buys[:50]
+        except Exception as e:
+            data["recent_buy_triggers_error"] = str(e)
+            data["recent_buy_triggers"] = []
+
         return jsonify(data)
 
     except Exception as e:
