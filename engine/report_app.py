@@ -54,46 +54,39 @@ def aggregate_fills_by_order_id(activities):
 def home():
     return "Alpaca Report Service Running"
 
-
 @app.route("/report")
 def report():
-    """Minimal Phase 1 report: account + TSLA position"""
-
-    # Get account
-    acct = api.get_account()
-
-    # Try to get TSLA position (may not exist if flat)
-    position_data = None
+    """Report: account + TSLA position + (optional) recent fills. Always returns JSON."""
     try:
-        pos = api.get_position("TSLA")
-        position_data = {
-            "symbol": pos.symbol,
-            "qty": float(pos.qty),
-            "avg_entry": float(pos.avg_entry_price),
-            "market_value": float(pos.market_value),
-            "unrealized_pl": float(pos.unrealized_pl),
-            "current_price": float(pos.current_price),
-        }
-    except Exception:
+        acct = api.get_account()
+
+        # TSLA position (may not exist)
         position_data = None
-        
-    # --- Get recent fills (last 3 days) ---
-    after = (datetime.utcnow() - timedelta(days=3)).isoformat()
-    activities = api.get_activities(
-        activity_types="FILL",
-        after=after
-    )
+        try:
+            pos = api.get_position("TSLA")
+            position_data = {
+                "symbol": pos.symbol,
+                "qty": float(pos.qty),
+                "avg_entry": float(pos.avg_entry_price),
+                "market_value": float(pos.market_value),
+                "unrealized_pl": float(pos.unrealized_pl),
+                "current_price": float(pos.current_price),
+            }
+        except Exception as e:
+            position_data = None
 
-    aggregated_fills = aggregate_fills_by_order_id(activities)
+        data = {
+            "ok": True,
+            "account": {
+                "equity": float(acct.equity),
+                "cash": float(acct.cash),
+                "buying_power": float(acct.buying_power),
+            },
+            "position": position_data,
+        }
+        return jsonify(data)
 
-    data = {
-        "account": {
-            "equity": float(acct.equity),
-            "cash": float(acct.cash),
-            "buying_power": float(acct.buying_power),
-        },
-        "position": position_data,
-        "recent_buy_triggers": aggregated_fills[:50]
-    }
+    except Exception as e:
+        # This makes debugging painless (you'll see the error in the browser)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-    return jsonify(data)
