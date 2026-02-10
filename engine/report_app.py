@@ -118,6 +118,15 @@ def to_central(ts):
         return ct_time.strftime("%b %d, %Y %I:%M:%S %p CT")
     except:
         return str(ts)
+        
+def fmt_ct_any(ts):
+    # Accepts datetime OR ISO string
+    if ts is None:
+        return None
+    if isinstance(ts, str):
+        dt = _parse_iso_time(ts)
+        return to_central(dt) if dt else ts
+    return to_central(ts)
 
 @app.route("/")
 def home():
@@ -197,6 +206,7 @@ def report():
                     return t or datetime.max
                 
                 anchor_row = min(group_buys, key=_row_time)
+                group_start_time = anchor_row.get("time")  # start of group = anchor time
                 anchor_price = float(anchor_row["vwap"])
 
                 # strategy settings (hard-coded for now; later we read from config)
@@ -251,7 +261,7 @@ def report():
                     distance_to_next_buy = round(current_price - next_buy_price, 4)
 
                 active_group = {
-                    "group_start_time": to_central(_parse_iso_time(group_start_time)),
+                    "group_start_time": fmt_ct_any(group_start_time),
                     "anchor_vwap": round(anchor_price, 4),
                     "sell_target": round(sell_target, 4),
                     "buys_count": buys_count,
@@ -263,7 +273,7 @@ def report():
                     "current_price": round(current_price, 4) if current_price is not None else None,
                     "distance_to_sell": distance_to_sell,
                     "distance_to_next_buy": distance_to_next_buy,
-                    "anchor_time": to_central(_parse_iso_time(anchor_row.get("time"))),
+                    "anchor_time": fmt_ct_any(anchor_row.get("time")),
                     "anchor_order_id": anchor_row.get("order_id"),
                 }
 
@@ -287,7 +297,7 @@ def report():
 
                     active_group_triggers.append({
                         "trigger": i,
-                        "time": to_central(_parse_iso_time(row.get("time"))),
+                        "time": fmt_ct_any(row.get("time")),
                         "shares": row.get("filled_qty"),
                         "avg_price": round(vwap, 4),
                         "total_dollars": row.get("total_dollars"),
@@ -327,4 +337,12 @@ def active_group_triggers_only():
         "ok": data.get("ok", False),
         "active_group": data.get("active_group", None),
         "active_group_triggers": data.get("active_group_triggers", [])
+    })
+    
+    return jsonify({
+    "ok": data.get("ok", False),
+    "error": data.get("error"),
+    "active_group_error": data.get("active_group_error"),
+    "active_group": data.get("active_group", None),
+    "active_group_triggers": data.get("active_group_triggers", [])
     })
