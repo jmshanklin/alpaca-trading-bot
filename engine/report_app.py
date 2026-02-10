@@ -251,7 +251,7 @@ def report():
                     distance_to_next_buy = round(current_price - next_buy_price, 4)
 
                 active_group = {
-                    "group_start_time": anchor_row["time"],
+                    "group_start_time": to_central(_parse_iso_time(group_start_time)),
                     "anchor_vwap": round(anchor_price, 4),
                     "sell_target": round(sell_target, 4),
                     "buys_count": buys_count,
@@ -263,7 +263,7 @@ def report():
                     "current_price": round(current_price, 4) if current_price is not None else None,
                     "distance_to_sell": distance_to_sell,
                     "distance_to_next_buy": distance_to_next_buy,
-                    "anchor_time": anchor_row.get("time"),
+                    "anchor_time": to_central(_parse_iso_time(anchor_row.get("time"))),
                     "anchor_order_id": anchor_row.get("order_id"),
                 }
 
