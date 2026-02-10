@@ -406,6 +406,20 @@ def table_view():
                     f"<td>{row.get('intended_drop')}</td>"
                     f"<td>{row.get('actual_drop')}</td>"
                     "</tr>")
+        
+    # Add "next buy" ghost row (what the bot is waiting for)
+    if ag and ag.get("next_buy_price") is not None and ag.get("buys_count") is not None:
+        next_trigger = int(ag["buys_count"]) + 1
+        intended_drop_next = ((next_trigger - 1) // 5) + 1  # matches your rule
+        html.append("<tr>"
+                    f"<td><b>{next_trigger}</b></td>"
+                    f"<td><b>WAITING</b></td>"
+                    f"<td>12</td>"
+                    f"<td>—</td>"
+                    f"<td><b>{ag.get('next_buy_price')}</b></td>"
+                    f"<td><b>{intended_drop_next}</b></td>"
+                    f"<td>—</td>"
+                    "</tr>")
 
     html.append("</table>")
     html.append("</body></html>")
