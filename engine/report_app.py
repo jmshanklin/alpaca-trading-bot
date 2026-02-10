@@ -216,6 +216,38 @@ def report():
                 }
 
             data["active_group"] = active_group
+            # --- Active Group Triggers table (Excel-style) ---
+            active_group_triggers = []
+            if group_buys:
+                # group_buys is newest-first; we want oldest-first for ladder math
+                ladder = list(reversed(group_buys))
+
+                prev_vwap = None
+                for i, row in enumerate(ladder, start=1):
+                    vwap = float(row["vwap"])
+
+                    # Intended drop: 1 for triggers 2-5, 2 for 6-10, 3 for 11-15, 4 for 16-20, ...
+                    intended_drop = ((i - 1) // 5) + 1 if i > 1 else None
+
+                    actual_drop = None
+                    if prev_vwap is not None:
+                        actual_drop = round(prev_vwap - vwap, 4)
+
+                    active_group_triggers.append({
+                        "trigger": i,
+                        "time": row.get("time"),
+                        "shares": row.get("filled_qty"),
+                        "avg_price": round(vwap, 4),
+                        "total_dollars": row.get("total_dollars"),
+                        "actual_drop": actual_drop,
+                        "intended_drop": intended_drop,
+                        "order_id": row.get("order_id"),
+                    })
+
+                    prev_vwap = vwap
+
+            data["active_group_triggers"] = active_group_triggers
+
             data["active_group_last_sell_time"] = (last_sell_ts.isoformat() if last_sell_ts else None)
 
         except Exception as e:
