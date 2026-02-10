@@ -202,17 +202,36 @@ def report():
                 completed_drops += stage * partial
 
                 next_buy_price = anchor_price - (completed_drops + stage)
+                
+                # current price (from position, if available)
+                current_price = None
+                try:
+                    if position_data and position_data.get("current_price") is not None:
+                        current_price = float(position_data["current_price"])
+                except Exception:
+                    current_price = None
+
+                sell_target = anchor_price + SELL_OFFSET
+
+                distance_to_sell = None
+                distance_to_next_buy = None
+                if current_price is not None:
+                    distance_to_sell = round(sell_target - current_price, 4)
+                    distance_to_next_buy = round(current_price - next_buy_price, 4)
 
                 active_group = {
                     "group_start_time": anchor_row["time"],
                     "anchor_vwap": round(anchor_price, 4),
-                    "sell_target": round(anchor_price + SELL_OFFSET, 4),
+                    "sell_target": round(sell_target, 4),
                     "buys_count": buys_count,
                     "drop_increment": drop_increment,
                     "buys_in_this_increment": buys_in_this_stage,
                     "buys_remaining_before_increment_increases": buys_remaining_before_increment_increases,
                     "next_buy_price": round(next_buy_price, 4),
                     "shares_expected": buys_count * BUY_QTY,
+                    "current_price": round(current_price, 4) if current_price is not None else None,
+                    "distance_to_sell": distance_to_sell,
+                    "distance_to_next_buy": distance_to_next_buy,
                 }
 
             data["active_group"] = active_group
