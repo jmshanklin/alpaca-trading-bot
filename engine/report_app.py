@@ -2,6 +2,7 @@ import os
 from flask import Flask, jsonify
 import alpaca_trade_api as tradeapi
 from datetime import datetime, timedelta
+import pytz
 
 app = Flask(__name__)
 
@@ -98,6 +99,25 @@ def find_last_tsla_sell_time(activities):
             if last is None or ts > last:
                 last = ts
     return last
+    
+# --- Timezone helper (UTC ➜ Central Time with AM/PM) ---
+def to_central(ts):
+    if not ts:
+        return None
+
+    try:
+        utc = pytz.utc
+        central = pytz.timezone("US/Central")
+
+        # ensure timestamp is timezone-aware
+        if ts.tzinfo is None:
+            ts = utc.localize(ts)
+
+        ct_time = ts.astimezone(central)
+
+        return ct_time.strftime("%b %d, %Y %I:%M:%S %p CT")
+    except:
+        return str(ts)
 
 @app.route("/")
 def home():
