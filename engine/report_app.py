@@ -287,7 +287,7 @@ def report():
 
                     active_group_triggers.append({
                         "trigger": i,
-                        "time": row.get("time"),
+                        "time": to_central(_parse_iso_time(row.get("time"))),
                         "shares": row.get("filled_qty"),
                         "avg_price": round(vwap, 4),
                         "total_dollars": row.get("total_dollars"),
