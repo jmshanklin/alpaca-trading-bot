@@ -89,6 +89,145 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
     rows.sort(key=lambda r: r["time"], reverse=True)
     return rows
     
+def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
+    """
+    Like aggregate_fills_by_order_id, but includes BOTH buys and sells.
+    Returns rows sorted newest-first (same style as your existing aggregator).
+    """
+    grouped = {}
+
+    for act in activities:
+        symbol = _get_attr(act, "symbol")
+        if only_symbol and symbol != only_symbol:
+            continue
+
+        side = _get_attr(act, "side")
+        oid = _get_attr(act, "order_id")
+        qty = float(_get_attr(act, "qty", 0) or 0)
+        price = float(_get_attr(act, "price", 0) or 0)
+        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+
+        if oid is None:
+            oid = f"noid:{symbol}:{side}:{ts}:{price}:{qty}"
+
+        g = grouped.setdefault(oid, {
+            "order_id": oid,
+            "time": ts,
+            "side": side,
+            "symbol": symbol,
+            "filled_qty": 0.0,
+            "pv": 0.0,
+        })
+
+        g["filled_qty"] += qty
+        g["pv"] += qty * price
+
+        # keep earliest time
+        if ts and g["time"] and ts < g["time"]:
+            g["time"] = ts
+
+    rows = []
+    for _, g in grouped.items():
+        if g["filled_qty"] <= 0:
+            continue
+        vwap = g["pv"] / g["filled_qty"]
+        rows.append({
+            "time": g["time"].isoformat() if hasattr(g["time"], "isoformat") else str(g["time"]),
+            "symbol": g["symbol"],
+            "side": g["side"],
+            "filled_qty": int(round(g["filled_qty"])),
+            "vwap": round(float(vwap), 4),
+            "total_dollars": round(float(g["pv"]), 2),
+            "order_id": g["order_id"],
+        })
+
+    rows.sort(key=lambda r: r["time"], reverse=True)
+    return rows
+    
+def build_trade_cycles_from_order_rows(order_rows):
+    """
+    Build closed trade cycles from aggregated order rows.
+    Assumes your bot: multiple BUY orders -> one SELL order closes the group.
+    Input: order_rows (newest-first or oldest-first OK)
+    Output: cycles newest-first
+    """
+    # We want oldest -> newest to build cycles in time order
+    ordered = list(reversed(order_rows))  # now oldest-first
+
+    cycles = []
+    cur = None
+
+    def start_cycle(buy_row):
+        t = buy_row.get("time")
+        return {
+            "anchor_time_raw": t,
+            "anchor_time": fmt_ct_any(t),
+            "anchor_order_id": buy_row.get("order_id"),
+            "anchor_vwap": float(buy_row.get("vwap")),
+            "buy_orders": 0,
+            "shares": 0,
+            "cost": 0.0,
+            "last_buy_time_raw": t,
+        }
+
+    for r in ordered:
+        side = r.get("side")
+        qty = int(r.get("filled_qty") or 0)
+        vwap = float(r.get("vwap") or 0)
+        dollars = float(r.get("total_dollars") or 0)
+        t = r.get("time")
+
+        if side == "buy":
+            if cur is None:
+                cur = start_cycle(r)
+
+            cur["buy_orders"] += 1
+            cur["shares"] += qty
+            cur["cost"] += dollars
+            cur["last_buy_time_raw"] = t
+
+        elif side == "sell":
+            # If no active cycle, ignore (could be manual or older history)
+            if cur is None or cur["shares"] <= 0:
+                continue
+
+            sell_shares = qty
+            proceeds = dollars
+            sell_vwap = vwap
+
+            # Close cycle (assume sells all accumulated shares)
+            # If it’s not equal, we still compute with what was sold (safe)
+            shares_closed = min(cur["shares"], sell_shares) if sell_shares > 0 else cur["shares"]
+
+            avg_entry = (cur["cost"] / cur["shares"]) if cur["shares"] else None
+            avg_exit = sell_vwap
+
+            realized_pl = proceeds - cur["cost"]
+            realized_pl_perc = (realized_pl / cur["cost"] * 100.0) if cur["cost"] else None
+
+            cycles.append({
+                "anchor_time": cur["anchor_time"],
+                "anchor_order_id": cur["anchor_order_id"],
+                "anchor_vwap": round(cur["anchor_vwap"], 4),
+                "shares": cur["shares"],
+                "buy_orders": cur["buy_orders"],
+                "avg_entry": round(avg_entry, 4) if avg_entry is not None else None,
+                "sell_time": fmt_ct_any(t),
+                "sell_order_id": r.get("order_id"),
+                "avg_exit": round(avg_exit, 4) if avg_exit is not None else None,
+                "proceeds": round(proceeds, 2),
+                "cost": round(cur["cost"], 2),
+                "realized_pl": round(realized_pl, 2),
+                "realized_pl_pct": round(realized_pl_perc, 3) if realized_pl_perc is not None else None,
+            })
+
+            # Reset for next cycle
+            cur = None
+
+    # newest-first for display
+    cycles.sort(key=lambda x: x.get("sell_time") or "", reverse=True)
+    return cycles
+    
 def find_last_tsla_sell_time(activities):
     """Return timestamp of most recent TSLA sell fill, else None."""
     last = None
