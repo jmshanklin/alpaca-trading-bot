@@ -75,8 +75,9 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
             "side": g["side"],
             "filled_qty": int(round(g["filled_qty"])),
             "vwap": round(float(vwap), 4),
+            "total_dollars": round(float(g["pv"]), 2),
             "order_id": g["order_id"],
-        })
+        })             
 
     rows.sort(key=lambda r: r["time"], reverse=True)
     return rows
