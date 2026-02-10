@@ -22,7 +22,12 @@ def _get_attr(obj, name, default=None):
         return obj.get(name, default)
     except Exception:
         return default
-
+        
+def _parse_iso_time(s):
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy"):
     """
@@ -164,8 +169,14 @@ def report():
 
             active_group = None
             if group_buys:
-                # anchor is the OLDEST buy trigger in the current group
-                anchor_row = group_buys[-1]
+                # Anchor lock: FIRST buy trigger after last sell (oldest by time)
+                def _row_time(r):
+                    t = r.get("time")
+                    if isinstance(t, str):
+                        return _parse_iso_time(t) or datetime.max
+                    return t or datetime.max
+                
+                anchor_row = min(group_buys, key=_row_time)
                 anchor_price = float(anchor_row["vwap"])
 
                 # strategy settings (hard-coded for now; later we read from config)
@@ -232,6 +243,8 @@ def report():
                     "current_price": round(current_price, 4) if current_price is not None else None,
                     "distance_to_sell": distance_to_sell,
                     "distance_to_next_buy": distance_to_next_buy,
+                    "anchor_time": anchor_row.get("time"),
+                    "anchor_order_id": anchor_row.get("order_id"),
                 }
 
             data["active_group"] = active_group
