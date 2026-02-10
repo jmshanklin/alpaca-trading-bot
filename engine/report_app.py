@@ -260,3 +260,19 @@ def report():
         # This makes debugging painless (you'll see the error in the browser)
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route("/active_group_triggers")
+def active_group_triggers_only():
+    # call the existing /report logic internally
+    r = report()
+
+    # convert Flask response → Python dict
+    data = r.get_json() if hasattr(r, "get_json") else None
+    if not data:
+        return jsonify({"ok": False, "error": "Could not parse report output"}), 500
+
+    # return only the ladder-related data
+    return jsonify({
+        "ok": data.get("ok", False),
+        "active_group": data.get("active_group", None),
+        "active_group_triggers": data.get("active_group_triggers", [])
+    })
