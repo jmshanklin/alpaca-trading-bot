@@ -3,6 +3,7 @@ from flask import Flask, jsonify
 import alpaca_trade_api as tradeapi
 from datetime import datetime, timedelta
 import pytz
+from flask import Response
 
 app = Flask(__name__)
 
@@ -346,3 +347,62 @@ def active_group_triggers_only():
     "active_group": data.get("active_group", None),
     "active_group_triggers": data.get("active_group_triggers", [])
     })
+    
+@app.route("/table")
+def table_view():
+    r = report()
+    data = r.get_json() if hasattr(r, "get_json") else {}
+    ag = data.get("active_group") or {}
+    rows = data.get("active_group_triggers") or []
+
+    # Build HTML
+    html = []
+    html.append("<html><head><title>TSLA Ladder</title>")
+    html.append("""
+    <style>
+      body { font-family: Arial, sans-serif; padding: 16px; }
+      .box { padding: 12px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #ddd; padding: 8px; text-align: right; }
+      th { background: #f5f5f5; text-align: right; }
+      td:first-child, th:first-child { text-align: center; }
+      td:nth-child(2), th:nth-child(2) { text-align: left; }
+    </style>
+    """)
+    html.append("</head><body>")
+
+    # Header summary
+    html.append('<div class="box">')
+    html.append(f"<b>Anchor:</b> {ag.get('anchor_vwap')} @ {ag.get('anchor_time')}<br>")
+    html.append(f"<b>Sell Target:</b> {ag.get('sell_target')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_sell')}<br>")
+    html.append(f"<b>Next Buy:</b> {ag.get('next_buy_price')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_next_buy')}<br>")
+    html.append(f"<b>Buys:</b> {ag.get('buys_count')} &nbsp;&nbsp; <b>Drop Increment:</b> {ag.get('drop_increment')}")
+    html.append("</div>")
+
+    # Table
+    html.append("<table>")
+    html.append("<tr>"
+                "<th>#</th>"
+                "<th>Time (CT)</th>"
+                "<th>Shares</th>"
+                "<th>Total $</th>"
+                "<th>Avg Price</th>"
+                "<th>Intended Drop</th>"
+                "<th>Actual Drop</th>"
+                "</tr>")
+
+    for row in rows:
+        html.append("<tr>"
+                    f"<td>{row.get('trigger')}</td>"
+                    f"<td>{row.get('time')}</td>"
+                    f"<td>{row.get('shares')}</td>"
+                    f"<td>{row.get('total_dollars')}</td>"
+                    f"<td>{row.get('avg_price')}</td>"
+                    f"<td>{row.get('intended_drop')}</td>"
+                    f"<td>{row.get('actual_drop')}</td>"
+                    "</tr>")
+
+    html.append("</table>")
+    html.append("</body></html>")
+
+    return Response("\n".join(html), mimetype="text/html")
