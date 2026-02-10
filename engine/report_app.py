@@ -487,6 +487,27 @@ def active_group_triggers_only():
     "active_group_triggers": data.get("active_group_triggers", [])
     })
     
+@app.route("/cycles")
+def cycles():
+    """
+    Closed trade cycles (BUY group -> SELL closes group), derived from Alpaca FILL activities.
+    Returns JSON only.
+    """
+    try:
+        after = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
+        acts = api.get_activities(activity_types="FILL", after=after)
+
+        # Step-1A function must exist; this will fail loudly if it doesn't
+        orders = aggregate_fills_all_sides_by_order_id(acts, only_symbol="TSLA")
+
+        # Step-1B function must exist; this will fail loudly if it doesn't
+        cycles = build_trade_cycles_from_order_rows(orders)
+
+        return jsonify({"ok": True, "cycles": cycles})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    
 @app.route("/table")
 def table_view():
     r = report()
