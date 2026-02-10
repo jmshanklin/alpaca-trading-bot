@@ -357,7 +357,8 @@ def table_view():
 
     # Build HTML
     html = []
-    html.append("<html><head><title>TSLA Ladder</title>")
+    REFRESH_SECONDS = 15
+    html.append(f"<html><head><title>TSLA Ladder</title><meta http-equiv='refresh' content='{REFRESH_SECONDS}'>")
     html.append("""
     <style>
       body { font-family: Arial, sans-serif; padding: 16px; }
@@ -370,9 +371,13 @@ def table_view():
     </style>
     """)
     html.append("</head><body>")
+    
+    # Last updated timestamp (Central Time)
+    now_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
 
     # Header summary
     html.append('<div class="box">')
+    html.append(f"<b>Last updated:</b> {now_ct}<br><br>")
     html.append(f"<b>Anchor:</b> {ag.get('anchor_vwap')} @ {ag.get('anchor_time')}<br>")
     html.append(f"<b>Sell Target:</b> {ag.get('sell_target')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_sell')}<br>")
     html.append(f"<b>Next Buy:</b> {ag.get('next_buy_price')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_next_buy')}<br>")
