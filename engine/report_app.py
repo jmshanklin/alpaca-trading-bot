@@ -1,8 +1,9 @@
 import os
-from flask import Flask, jsonify, Response
-import alpaca_trade_api as tradeapi
 from datetime import datetime, timedelta
+
+import alpaca_trade_api as tradeapi
 import pytz
+from flask import Flask, Response, jsonify
 
 app = Flask(__name__)
 
@@ -263,7 +264,7 @@ def build_trade_cycles_from_order_rows(order_rows):
 
             cur = None
 
-    # FIX 1: robust sort using RAW sell time (not formatted CT string)
+    # robust sort using RAW sell time (not formatted CT string)
     def _sell_sort_key(c):
         raw = c.get("sell_time_raw")
         if isinstance(raw, str):
@@ -276,9 +277,7 @@ def build_trade_cycles_from_order_rows(order_rows):
 
 
 def compute_cycles(days=30, symbol="TSLA"):
-    """
-    FIX 2: shared cycles engine (so /cycles and other callers reuse identical logic)
-    """
+    """Shared cycles engine (so /cycles and other callers reuse identical logic)."""
     after = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
     acts = api.get_activities(activity_types="FILL", after=after)
     orders = aggregate_fills_all_sides_by_order_id(acts, only_symbol=symbol)
@@ -477,9 +476,7 @@ def report():
 
 @app.route("/active_group_triggers")
 def active_group_triggers_only():
-    """
-    Clean endpoint for the ladder JSON.
-    """
+    """Clean endpoint for the ladder JSON."""
     try:
         r = report()
         if isinstance(r, tuple):
@@ -535,19 +532,21 @@ def table_view():
     - Ladder (server-rendered)
     - Cycles table (filled by JS fetch to /cycles)
     """
+    # FIX: report() may return (resp, status) tuple on error
     r = report()
-    data = r.get_json() if hasattr(r, "get_json") else {}
+    if isinstance(r, tuple):
+        resp, _status = r
+        data = resp.get_json() if hasattr(resp, "get_json") else {}
+    else:
+        data = r.get_json() if hasattr(r, "get_json") else {}
+
     ag = data.get("active_group") or {}
     rows = data.get("active_group_triggers") or []
 
     html = []
 
-    # We fetch cycles via JS on a timer (no full-page refresh)
-    REFRESH_SECONDS = 0
-
-    html.append(
-        f"<html><head><title>TSLA Ladder</title><meta http-equiv='refresh' content='{REFRESH_SECONDS}'>"
-    )
+    # FIX: remove meta refresh entirely (avoid any browser weirdness)
+    html.append("<html><head><title>TSLA Ladder</title>")
     html.append(
         """
     <style>
@@ -654,7 +653,6 @@ def table_view():
 
     # -------------------------
     # JS: load cycles every 15s (no full-page refresh)
-    # FIX 3: disable cache so data updates reliably
     # -------------------------
     html.append(
         """
