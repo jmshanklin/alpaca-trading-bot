@@ -540,7 +540,7 @@ def table_view():
       .box { padding: 12px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; }
       .row { margin: 4px 0; }
       /* Account: two-column rows (same font as rest) */
-      .acct-grid { max-width: 700px; margin: 0 auto; }
+      .acct-grid { max-width: 500px; margin: 0; }
       .acct-row {
         display: grid;
         grid-template-columns: 1fr auto;
@@ -555,7 +555,22 @@ def table_view():
       th { background: #f5f5f5; text-align: right; }
       td:first-child, th:first-child { text-align: center; }
       td:nth-child(2), th:nth-child(2) { text-align: left; }
-    </style>
+     /* BIG live TSLA price banner */
+     .price-banner {
+       font-size: 42px;
+       font-weight: bold;
+       text-align: center;
+       margin-bottom: 10px;
+     }
+    
+     .price-label {
+       font-size: 16px;
+       color: #666;
+       text-align: center;
+       margin-bottom: 4px;
+     }
+     </style>
+
     """
     )
     html.append("</head><body>")
@@ -567,6 +582,8 @@ def table_view():
     # Top summary box (Active Group + Position)
     # -------------------------
     html.append('<div class="box">')
+    html.append("<div class='price-label'>TSLA Price</div>")
+    html.append(f"<div class='price-banner'>$<span id='tsla-price'>{money(pos.get('current_price')) if pos else ''}</span></div>")
     html.append(f"<div class='row'><b>Last updated:</b> <span id='last-updated'>{now_ct}</span></div>")
     html.append("<br>")
 
@@ -769,6 +786,7 @@ def table_view():
         // Position
         const pos = data.position || {};
         if (pos && Object.keys(pos).length) {
+          setText("tsla-price", fmtMoney(pos.current_price));
           setText("pos-qty", pos.qty);
           setText("pos-avg", fmtMoney(pos.avg_entry));
           setText("pos-mv", fmtMoney(pos.market_value));
