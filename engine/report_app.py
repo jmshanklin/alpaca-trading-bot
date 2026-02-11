@@ -539,6 +539,16 @@ def table_view():
       body { font-family: Arial, sans-serif; padding: 16px; }
       .box { padding: 12px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; }
       .row { margin: 4px 0; }
+      /* Account: two-column rows (same font as rest) */
+      .acct-grid { max-width: 700px; margin: 0 auto; }
+      .acct-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 16px;
+        padding: 2px 0;
+      }
+      .acct-label { text-align: left; }
+      .acct-value { text-align: right; font-variant-numeric: tabular-nums; }
       .muted { color: #666; }
       table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
       th, td { border: 1px solid #ddd; padding: 8px; text-align: right; }
@@ -599,29 +609,37 @@ def table_view():
     html.append("</div>")
 
     # -------------------------
-    # Account box (vertical list, SAME FONT)
+    # Account box (2-column grid, same font)
     # -------------------------
-    html.append("<div class='box'>")
+    html.append("<div class='box acct-grid'>")
     html.append("<div class='row'><b>Account</b></div>")
     html.append("<div class='row muted'>Updates every 15 seconds (time-based), independent of trade activity.</div>")
     html.append("<br>")
-
-    def acct_line(label, key, fmt="money"):
+    
+    def acct_row(label, key, fmt="money"):
         val = acct.get(key)
         sval = money0(val) if fmt == "money0" else money(val)
-        return f"<div class='row'>{label}: $<span id='acct-{key}'>{sval}</span></div>"
-
-    html.append(acct_line("Equity", "equity"))
-    html.append(acct_line("Cash", "cash"))
-    html.append(acct_line("Buying Power", "buying_power", fmt="money0"))
-    html.append(acct_line("RegT Buying Power", "regt_buying_power", fmt="money0"))
-    html.append(acct_line("Day Trading Buying Power", "daytrading_buying_power", fmt="money0"))
-    html.append(acct_line("Effective Buying Power", "effective_buying_power", fmt="money0"))
-    html.append(acct_line("Non-Marginable Buying Power", "non_marginable_buying_power", fmt="money0"))
+        return (
+            "<div class='acct-row'>"
+            f"<div class='acct-label'>{label}</div>"
+            f"<div class='acct-value'>$<span id='acct-{key}'>{sval}</span></div>"
+            "</div>"
+        )
+    
+    html.append(acct_row("Equity", "equity"))
+    html.append(acct_row("Cash", "cash"))
+    html.append(acct_row("Buying Power", "buying_power", fmt="money0"))
+    html.append(acct_row("RegT Buying Power", "regt_buying_power", fmt="money0"))
+    html.append(acct_row("Day Trading Buying Power", "daytrading_buying_power", fmt="money0"))
+    html.append(acct_row("Effective Buying Power", "effective_buying_power", fmt="money0"))
+    html.append(acct_row("Non-Marginable Buying Power", "non_marginable_buying_power", fmt="money0"))
+    
     html.append("<br>")
-    html.append(acct_line("Long Market Value", "long_market_value"))
-    html.append(acct_line("Initial Margin", "initial_margin"))
-    html.append(acct_line("Maintenance Margin", "maintenance_margin"))
+    
+    html.append(acct_row("Long Market Value", "long_market_value"))
+    html.append(acct_row("Initial Margin", "initial_margin"))
+    html.append(acct_row("Maintenance Margin", "maintenance_margin"))
+    
     html.append("</div>")
 
     # -------------------------
