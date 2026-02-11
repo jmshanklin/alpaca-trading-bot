@@ -540,7 +540,7 @@ def table_view():
       .box { padding: 12px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; }
       .row { margin: 4px 0; }
       /* Account: two-column rows (same font as rest) */
-      .acct-grid { max-width: 500px; margin: 0; }
+      .acct-grid { max-width: 400px; margin: 0; }
       .acct-row {
         display: grid;
         grid-template-columns: 1fr auto;
