@@ -1,9 +1,8 @@
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, Response
 import alpaca_trade_api as tradeapi
 from datetime import datetime, timedelta
 import pytz
-from flask import Response
 
 app = Flask(__name__)
 
@@ -11,11 +10,14 @@ app = Flask(__name__)
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 BASE_URL = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
-
 api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
 
+
+# -------------------------
+# Helpers
+# -------------------------
 def _get_attr(obj, name, default=None):
-    # Works whether Alpaca returns an object or dict-like
+    """Works whether Alpaca returns an object or dict-like."""
     try:
         return getattr(obj, name)
     except Exception:
@@ -24,13 +26,46 @@ def _get_attr(obj, name, default=None):
         return obj.get(name, default)
     except Exception:
         return default
-        
+
+
 def _parse_iso_time(s):
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except Exception:
         return None
 
+
+# --- Timezone helper (UTC ➜ Central Time with AM/PM) ---
+def to_central(ts):
+    if not ts:
+        return None
+    try:
+        utc = pytz.utc
+        central = pytz.timezone("US/Central")
+
+        # ensure timestamp is timezone-aware
+        if ts.tzinfo is None:
+            ts = utc.localize(ts)
+
+        ct_time = ts.astimezone(central)
+        return ct_time.strftime("%b %d, %Y %I:%M:%S %p CT")
+    except Exception:
+        return str(ts)
+
+
+def fmt_ct_any(ts):
+    """Accepts datetime OR ISO string."""
+    if ts is None:
+        return None
+    if isinstance(ts, str):
+        dt = _parse_iso_time(ts)
+        return to_central(dt) if dt else ts
+    return to_central(ts)
+
+
+# -------------------------
+# Aggregation + Cycles
+# -------------------------
 def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy"):
     """
     Turn Alpaca FILL activities into one row per order_id.
@@ -52,17 +87,19 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
         ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
 
         if oid is None:
-            # fallback grouping if order_id missing: time+price+qty
             oid = f"noid:{symbol}:{side}:{ts}:{price}:{qty}"
 
-        g = grouped.setdefault(oid, {
-            "order_id": oid,
-            "time": ts,
-            "side": side,
-            "symbol": symbol,
-            "filled_qty": 0.0,
-            "pv": 0.0,
-        })
+        g = grouped.setdefault(
+            oid,
+            {
+                "order_id": oid,
+                "time": ts,
+                "side": side,
+                "symbol": symbol,
+                "filled_qty": 0.0,
+                "pv": 0.0,
+            },
+        )
 
         g["filled_qty"] += qty
         g["pv"] += qty * price
@@ -76,23 +113,26 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
         if g["filled_qty"] <= 0:
             continue
         vwap = g["pv"] / g["filled_qty"]
-        rows.append({
-            "time": g["time"].isoformat() if hasattr(g["time"], "isoformat") else str(g["time"]),
-            "symbol": g["symbol"],
-            "side": g["side"],
-            "filled_qty": int(round(g["filled_qty"])),
-            "vwap": round(float(vwap), 4),
-            "total_dollars": round(float(g["pv"]), 2),
-            "order_id": g["order_id"],
-        })             
+        rows.append(
+            {
+                "time": g["time"].isoformat() if hasattr(g["time"], "isoformat") else str(g["time"]),
+                "symbol": g["symbol"],
+                "side": g["side"],
+                "filled_qty": int(round(g["filled_qty"])),
+                "vwap": round(float(vwap), 4),
+                "total_dollars": round(float(g["pv"]), 2),
+                "order_id": g["order_id"],
+            }
+        )
 
     rows.sort(key=lambda r: r["time"], reverse=True)
     return rows
-    
+
+
 def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
     """
     Like aggregate_fills_by_order_id, but includes BOTH buys and sells.
-    Returns rows sorted newest-first (same style as your existing aggregator).
+    Returns rows sorted newest-first.
     """
     grouped = {}
 
@@ -110,14 +150,17 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
         if oid is None:
             oid = f"noid:{symbol}:{side}:{ts}:{price}:{qty}"
 
-        g = grouped.setdefault(oid, {
-            "order_id": oid,
-            "time": ts,
-            "side": side,
-            "symbol": symbol,
-            "filled_qty": 0.0,
-            "pv": 0.0,
-        })
+        g = grouped.setdefault(
+            oid,
+            {
+                "order_id": oid,
+                "time": ts,
+                "side": side,
+                "symbol": symbol,
+                "filled_qty": 0.0,
+                "pv": 0.0,
+            },
+        )
 
         g["filled_qty"] += qty
         g["pv"] += qty * price
@@ -131,19 +174,22 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
         if g["filled_qty"] <= 0:
             continue
         vwap = g["pv"] / g["filled_qty"]
-        rows.append({
-            "time": g["time"].isoformat() if hasattr(g["time"], "isoformat") else str(g["time"]),
-            "symbol": g["symbol"],
-            "side": g["side"],
-            "filled_qty": int(round(g["filled_qty"])),
-            "vwap": round(float(vwap), 4),
-            "total_dollars": round(float(g["pv"]), 2),
-            "order_id": g["order_id"],
-        })
+        rows.append(
+            {
+                "time": g["time"].isoformat() if hasattr(g["time"], "isoformat") else str(g["time"]),
+                "symbol": g["symbol"],
+                "side": g["side"],
+                "filled_qty": int(round(g["filled_qty"])),
+                "vwap": round(float(vwap), 4),
+                "total_dollars": round(float(g["pv"]), 2),
+                "order_id": g["order_id"],
+            }
+        )
 
     rows.sort(key=lambda r: r["time"], reverse=True)
     return rows
-    
+
+
 def build_trade_cycles_from_order_rows(order_rows):
     """
     Build closed trade cycles from aggregated order rows.
@@ -151,8 +197,7 @@ def build_trade_cycles_from_order_rows(order_rows):
     Input: order_rows (newest-first or oldest-first OK)
     Output: cycles newest-first
     """
-    # We want oldest -> newest to build cycles in time order
-    ordered = list(reversed(order_rows))  # now oldest-first
+    ordered = list(reversed(order_rows))  # oldest-first
 
     cycles = []
     cur = None
@@ -163,7 +208,7 @@ def build_trade_cycles_from_order_rows(order_rows):
             "anchor_time_raw": t,
             "anchor_time": fmt_ct_any(t),
             "anchor_order_id": buy_row.get("order_id"),
-            "anchor_vwap": float(buy_row.get("vwap")),
+            "anchor_vwap": float(buy_row.get("vwap") or 0),
             "buy_orders": 0,
             "shares": 0,
             "cost": 0.0,
@@ -180,54 +225,66 @@ def build_trade_cycles_from_order_rows(order_rows):
         if side == "buy":
             if cur is None:
                 cur = start_cycle(r)
-
             cur["buy_orders"] += 1
             cur["shares"] += qty
             cur["cost"] += dollars
             cur["last_buy_time_raw"] = t
 
         elif side == "sell":
-            # If no active cycle, ignore (could be manual or older history)
             if cur is None or cur["shares"] <= 0:
                 continue
 
-            sell_shares = qty
             proceeds = dollars
-            sell_vwap = vwap
-
-            # Close cycle (assume sells all accumulated shares)
-            # If it’s not equal, we still compute with what was sold (safe)
-            shares_closed = min(cur["shares"], sell_shares) if sell_shares > 0 else cur["shares"]
-
             avg_entry = (cur["cost"] / cur["shares"]) if cur["shares"] else None
-            avg_exit = sell_vwap
+            avg_exit = vwap
 
             realized_pl = proceeds - cur["cost"]
-            realized_pl_perc = (realized_pl / cur["cost"] * 100.0) if cur["cost"] else None
+            realized_pl_pct = (realized_pl / cur["cost"] * 100.0) if cur["cost"] else None
 
-            cycles.append({
-                "anchor_time": cur["anchor_time"],
-                "anchor_order_id": cur["anchor_order_id"],
-                "anchor_vwap": round(cur["anchor_vwap"], 4),
-                "shares": cur["shares"],
-                "buy_orders": cur["buy_orders"],
-                "avg_entry": round(avg_entry, 4) if avg_entry is not None else None,
-                "sell_time": fmt_ct_any(t),
-                "sell_order_id": r.get("order_id"),
-                "avg_exit": round(avg_exit, 4) if avg_exit is not None else None,
-                "proceeds": round(proceeds, 2),
-                "cost": round(cur["cost"], 2),
-                "realized_pl": round(realized_pl, 2),
-                "realized_pl_pct": round(realized_pl_perc, 3) if realized_pl_perc is not None else None,
-            })
+            cycles.append(
+                {
+                    "anchor_time": cur["anchor_time"],
+                    "anchor_time_raw": cur["anchor_time_raw"],
+                    "anchor_order_id": cur["anchor_order_id"],
+                    "anchor_vwap": round(cur["anchor_vwap"], 4),
+                    "shares": cur["shares"],
+                    "buy_orders": cur["buy_orders"],
+                    "avg_entry": round(avg_entry, 4) if avg_entry is not None else None,
+                    "sell_time": fmt_ct_any(t),
+                    "sell_time_raw": t,
+                    "sell_order_id": r.get("order_id"),
+                    "avg_exit": round(avg_exit, 4) if avg_exit is not None else None,
+                    "proceeds": round(proceeds, 2),
+                    "cost": round(cur["cost"], 2),
+                    "realized_pl": round(realized_pl, 2),
+                    "realized_pl_pct": round(realized_pl_pct, 3) if realized_pl_pct is not None else None,
+                }
+            )
 
-            # Reset for next cycle
             cur = None
 
-    # newest-first for display
-    cycles.sort(key=lambda x: x.get("sell_time") or "", reverse=True)
+    # FIX 1: robust sort using RAW sell time (not formatted CT string)
+    def _sell_sort_key(c):
+        raw = c.get("sell_time_raw")
+        if isinstance(raw, str):
+            dt = _parse_iso_time(raw)
+            return dt or datetime.min
+        return raw or datetime.min
+
+    cycles.sort(key=_sell_sort_key, reverse=True)
     return cycles
-    
+
+
+def compute_cycles(days=30, symbol="TSLA"):
+    """
+    FIX 2: shared cycles engine (so /cycles and other callers reuse identical logic)
+    """
+    after = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+    acts = api.get_activities(activity_types="FILL", after=after)
+    orders = aggregate_fills_all_sides_by_order_id(acts, only_symbol=symbol)
+    return build_trade_cycles_from_order_rows(orders)
+
+
 def find_last_tsla_sell_time(activities):
     """Return timestamp of most recent TSLA sell fill, else None."""
     last = None
@@ -239,42 +296,19 @@ def find_last_tsla_sell_time(activities):
             if last is None or ts > last:
                 last = ts
     return last
-    
-# --- Timezone helper (UTC ➜ Central Time with AM/PM) ---
-def to_central(ts):
-    if not ts:
-        return None
 
-    try:
-        utc = pytz.utc
-        central = pytz.timezone("US/Central")
 
-        # ensure timestamp is timezone-aware
-        if ts.tzinfo is None:
-            ts = utc.localize(ts)
-
-        ct_time = ts.astimezone(central)
-
-        return ct_time.strftime("%b %d, %Y %I:%M:%S %p CT")
-    except:
-        return str(ts)
-        
-def fmt_ct_any(ts):
-    # Accepts datetime OR ISO string
-    if ts is None:
-        return None
-    if isinstance(ts, str):
-        dt = _parse_iso_time(ts)
-        return to_central(dt) if dt else ts
-    return to_central(ts)
-
+# -------------------------
+# Routes
+# -------------------------
 @app.route("/")
 def home():
     return "Alpaca Report Service Running"
 
+
 @app.route("/report")
 def report():
-    """Report: account + TSLA position + (optional) recent fills. Always returns JSON."""
+    """Report: account + TSLA position + active group + ladder triggers. Always returns JSON."""
     try:
         acct = api.get_account()
 
@@ -290,7 +324,7 @@ def report():
                 "unrealized_pl": float(pos.unrealized_pl),
                 "current_price": float(pos.current_price),
             }
-        except Exception as e:
+        except Exception:
             position_data = None
 
         data = {
@@ -312,10 +346,9 @@ def report():
         except Exception as e:
             data["recent_buy_triggers_error"] = str(e)
             data["recent_buy_triggers"] = []
-            
+
         # --- Active Group (computed from activities; one-group mode) ---
         try:
-            # pull both buys + sells so we can find last sell time
             after2 = (datetime.utcnow() - timedelta(days=10)).isoformat() + "Z"
             acts2 = api.get_activities(activity_types="FILL", after=after2)
 
@@ -333,10 +366,11 @@ def report():
                     continue
                 tsla_buys_after.append(act)
 
-            # aggregate those buys into buy-triggers
             group_buys = aggregate_fills_by_order_id(tsla_buys_after, only_symbol="TSLA", only_side="buy")
 
             active_group = None
+            active_group_triggers = []
+
             if group_buys:
                 # Anchor lock: FIRST buy trigger after last sell (oldest by time)
                 def _row_time(r):
@@ -344,47 +378,33 @@ def report():
                     if isinstance(t, str):
                         return _parse_iso_time(t) or datetime.max
                     return t or datetime.max
-                
+
                 anchor_row = min(group_buys, key=_row_time)
-                group_start_time = anchor_row.get("time")  # start of group = anchor time
                 anchor_price = float(anchor_row["vwap"])
+                group_start_time = anchor_row.get("time")
 
-                # strategy settings (hard-coded for now; later we read from config)
+                # strategy settings (hard-coded for now)
                 BUY_QTY = 12
-                SELL_OFFSET = 2.0   # sell at anchor + $2
-                FIRST_INCREMENT_COUNT = 5  # 5 buys per increment step
+                SELL_OFFSET = 2.0
+                FIRST_INCREMENT_COUNT = 5
 
-                # count how many buy triggers are in the group
                 buys_count = len(group_buys)
-
-                # determine which increment stage we are in:
-                # stage 1 = $1 drops, stage 2 = $2 drops, stage 3 = $3 drops, etc.
                 stage = (buys_count - 1) // FIRST_INCREMENT_COUNT + 1
-                drop_increment = float(stage)  # $1, $2, $3...
+                drop_increment = float(stage)
 
                 buys_in_this_stage = (buys_count - 1) % FIRST_INCREMENT_COUNT + 1
                 buys_remaining_before_increment_increases = FIRST_INCREMENT_COUNT - buys_in_this_stage
 
-                # next buy trigger based on anchor and completed drops
-                # completed stage drops:
-                # stage 1 drops: 1,2,3,4,5
-                # stage 2 drops: 2,4,6,8,10
-                # etc.
+                # compute next buy price
                 completed_drops = 0.0
-                remaining = buys_count
-
-                # sum full stages
                 full_stages = (buys_count - 1) // FIRST_INCREMENT_COUNT
                 for s in range(1, full_stages + 1):
                     completed_drops += s * FIRST_INCREMENT_COUNT
-
-                # add partial stage drops
                 partial = (buys_count - 1) % FIRST_INCREMENT_COUNT
                 completed_drops += stage * partial
-
                 next_buy_price = anchor_price - (completed_drops + stage)
-                
-                # current price (from position, if available)
+
+                # current price
                 current_price = None
                 try:
                     if position_data and position_data.get("current_price") is not None:
@@ -417,76 +437,84 @@ def report():
                     "anchor_order_id": anchor_row.get("order_id"),
                 }
 
-            data["active_group"] = active_group
-            # --- Active Group Triggers table (Excel-style) ---
-            active_group_triggers = []
-            if group_buys:
-                # group_buys is newest-first; we want oldest-first for ladder math
-                ladder = list(reversed(group_buys))
-
+                # --- Active Group Triggers table (Excel-style) ---
+                ladder = list(reversed(group_buys))  # oldest-first
                 prev_vwap = None
                 for i, row in enumerate(ladder, start=1):
                     vwap = float(row["vwap"])
-
-                    # Intended drop: 1 for triggers 2-5, 2 for 6-10, 3 for 11-15, 4 for 16-20, ...
                     intended_drop = ((i - 1) // 5) + 1 if i > 1 else None
+                    actual_drop = round(prev_vwap - vwap, 4) if prev_vwap is not None else None
 
-                    actual_drop = None
-                    if prev_vwap is not None:
-                        actual_drop = round(prev_vwap - vwap, 4)
-
-                    active_group_triggers.append({
-                        "trigger": i,
-                        "time": fmt_ct_any(row.get("time")),
-                        "shares": row.get("filled_qty"),
-                        "avg_price": round(vwap, 4),
-                        "total_dollars": row.get("total_dollars"),
-                        "actual_drop": actual_drop,
-                        "intended_drop": intended_drop,
-                        "order_id": row.get("order_id"),
-                    })
+                    active_group_triggers.append(
+                        {
+                            "trigger": i,
+                            "time": fmt_ct_any(row.get("time")),
+                            "shares": row.get("filled_qty"),
+                            "avg_price": round(vwap, 4),
+                            "total_dollars": row.get("total_dollars"),
+                            "actual_drop": actual_drop,
+                            "intended_drop": intended_drop,
+                            "order_id": row.get("order_id"),
+                        }
+                    )
 
                     prev_vwap = vwap
 
+            data["active_group"] = active_group
             data["active_group_triggers"] = active_group_triggers
-
             data["active_group_last_sell_time"] = (last_sell_ts.isoformat() if last_sell_ts else None)
 
         except Exception as e:
             data["active_group_error"] = str(e)
             data["active_group"] = None
+            data["active_group_triggers"] = []
 
         return jsonify(data)
 
     except Exception as e:
-        # This makes debugging painless (you'll see the error in the browser)
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/active_group_triggers")
 def active_group_triggers_only():
-    # call the existing /report logic internally
-    r = report()
+    """
+    Clean endpoint for the ladder JSON.
+    """
+    try:
+        r = report()
+        if isinstance(r, tuple):
+            resp, status = r
+            data = resp.get_json() if hasattr(resp, "get_json") else {}
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": data.get("error", "Report failed"),
+                        "active_group": None,
+                        "active_group_triggers": [],
+                    }
+                ),
+                status,
+            )
 
-    # convert Flask response → Python dict
-    data = r.get_json() if hasattr(r, "get_json") else None
-    if not data:
-        return jsonify({"ok": False, "error": "Could not parse report output"}), 500
+        data = r.get_json() if hasattr(r, "get_json") else None
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "Could not parse report output"}), 500
 
-    # return only the ladder-related data
-    return jsonify({
-        "ok": data.get("ok", False),
-        "active_group": data.get("active_group", None),
-        "active_group_triggers": data.get("active_group_triggers", [])
-    })
-    
-    return jsonify({
-    "ok": data.get("ok", False),
-    "error": data.get("error"),
-    "active_group_error": data.get("active_group_error"),
-    "active_group": data.get("active_group", None),
-    "active_group_triggers": data.get("active_group_triggers", [])
-    })
-    
+        return jsonify(
+            {
+                "ok": data.get("ok", False),
+                "error": data.get("error"),
+                "active_group_error": data.get("active_group_error"),
+                "active_group": data.get("active_group", None),
+                "active_group_triggers": data.get("active_group_triggers", []),
+            }
+        )
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/cycles")
 def cycles():
     """
@@ -494,44 +522,47 @@ def cycles():
     Returns JSON only.
     """
     try:
-        after = (datetime.utcnow() - timedelta(days=30)).isoformat() + "Z"
-        acts = api.get_activities(activity_types="FILL", after=after)
-
-        # Step-1A function must exist; this will fail loudly if it doesn't
-        orders = aggregate_fills_all_sides_by_order_id(acts, only_symbol="TSLA")
-
-        # Step-1B function must exist; this will fail loudly if it doesn't
-        cycles = build_trade_cycles_from_order_rows(orders)
-
-        return jsonify({"ok": True, "cycles": cycles})
-
+        cyc = compute_cycles(days=30, symbol="TSLA")
+        return jsonify({"ok": True, "cycles": cyc})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-    
+
+
 @app.route("/table")
 def table_view():
+    """
+    HTML dashboard page:
+    - Ladder (server-rendered)
+    - Cycles table (filled by JS fetch to /cycles)
+    """
     r = report()
     data = r.get_json() if hasattr(r, "get_json") else {}
     ag = data.get("active_group") or {}
     rows = data.get("active_group_triggers") or []
 
-    # Build HTML
     html = []
-    REFRESH_SECONDS = 15
-    html.append(f"<html><head><title>TSLA Ladder</title><meta http-equiv='refresh' content='{REFRESH_SECONDS}'>")
-    html.append("""
+
+    # We fetch cycles via JS on a timer (no full-page refresh)
+    REFRESH_SECONDS = 0
+
+    html.append(
+        f"<html><head><title>TSLA Ladder</title><meta http-equiv='refresh' content='{REFRESH_SECONDS}'>"
+    )
+    html.append(
+        """
     <style>
       body { font-family: Arial, sans-serif; padding: 16px; }
       .box { padding: 12px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; }
-      table { border-collapse: collapse; width: 100%; }
+      table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
       th, td { border: 1px solid #ddd; padding: 8px; text-align: right; }
       th { background: #f5f5f5; text-align: right; }
       td:first-child, th:first-child { text-align: center; }
       td:nth-child(2), th:nth-child(2) { text-align: left; }
     </style>
-    """)
+    """
+    )
     html.append("</head><body>")
-    
+
     # Last updated timestamp (Central Time)
     now_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
 
@@ -539,49 +570,135 @@ def table_view():
     html.append('<div class="box">')
     html.append(f"<b>Last updated:</b> {now_ct}<br><br>")
     html.append(f"<b>Anchor:</b> {ag.get('anchor_vwap')} @ {ag.get('anchor_time')}<br>")
-    html.append(f"<b>Sell Target:</b> {ag.get('sell_target')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_sell')}<br>")
-    html.append(f"<b>Next Buy:</b> {ag.get('next_buy_price')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_next_buy')}<br>")
+    html.append(
+        f"<b>Sell Target:</b> {ag.get('sell_target')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_sell')}<br>"
+    )
+    html.append(
+        f"<b>Next Buy:</b> {ag.get('next_buy_price')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_next_buy')}<br>"
+    )
     html.append(f"<b>Buys:</b> {ag.get('buys_count')} &nbsp;&nbsp; <b>Drop Increment:</b> {ag.get('drop_increment')}")
     html.append("</div>")
 
-    # Table
+    # -------------------------
+    # Ladder table (FIRST)
+    # -------------------------
+    html.append("<h2>Active Group Ladder</h2>")
     html.append("<table>")
-    html.append("<tr>"
-                "<th>#</th>"
-                "<th>Time (CT)</th>"
-                "<th>Shares</th>"
-                "<th>Total $</th>"
-                "<th>Avg Price</th>"
-                "<th>Intended Drop</th>"
-                "<th>Actual Drop</th>"
-                "</tr>")
+    html.append(
+        "<tr>"
+        "<th>#</th>"
+        "<th>Time (CT)</th>"
+        "<th>Shares</th>"
+        "<th>Total $</th>"
+        "<th>Avg Price</th>"
+        "<th>Intended Drop</th>"
+        "<th>Actual Drop</th>"
+        "</tr>"
+    )
 
     for row in rows:
-        html.append("<tr>"
-                    f"<td>{row.get('trigger')}</td>"
-                    f"<td>{row.get('time')}</td>"
-                    f"<td>{row.get('shares')}</td>"
-                    f"<td>{row.get('total_dollars')}</td>"
-                    f"<td>{row.get('avg_price')}</td>"
-                    f"<td>{row.get('intended_drop')}</td>"
-                    f"<td>{row.get('actual_drop')}</td>"
-                    "</tr>")
-        
-    # Add "next buy" ghost row (what the bot is waiting for)
+        html.append(
+            "<tr>"
+            f"<td>{row.get('trigger')}</td>"
+            f"<td>{row.get('time')}</td>"
+            f"<td>{row.get('shares')}</td>"
+            f"<td>{row.get('total_dollars')}</td>"
+            f"<td>{row.get('avg_price')}</td>"
+            f"<td>{row.get('intended_drop')}</td>"
+            f"<td>{row.get('actual_drop')}</td>"
+            "</tr>"
+        )
+
+    # Add "next buy" ghost row
     if ag and ag.get("next_buy_price") is not None and ag.get("buys_count") is not None:
         next_trigger = int(ag["buys_count"]) + 1
-        intended_drop_next = ((next_trigger - 1) // 5) + 1  # matches your rule
-        html.append("<tr>"
-                    f"<td><b>{next_trigger}</b></td>"
-                    f"<td><b>WAITING</b></td>"
-                    f"<td>12</td>"
-                    f"<td>—</td>"
-                    f"<td><b>{ag.get('next_buy_price')}</b></td>"
-                    f"<td><b>{intended_drop_next}</b></td>"
-                    f"<td>—</td>"
-                    "</tr>")
+        intended_drop_next = ((next_trigger - 1) // 5) + 1
+        html.append(
+            "<tr>"
+            f"<td><b>{next_trigger}</b></td>"
+            f"<td><b>WAITING</b></td>"
+            f"<td>12</td>"
+            f"<td>—</td>"
+            f"<td><b>{ag.get('next_buy_price')}</b></td>"
+            f"<td><b>{intended_drop_next}</b></td>"
+            f"<td>—</td>"
+            "</tr>"
+        )
 
     html.append("</table>")
-    html.append("</body></html>")
 
+    # -------------------------
+    # Cycles table (SECOND)
+    # -------------------------
+    html.append("<h2>Closed Trade Cycles</h2>")
+    html.append(
+        """
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Start</th>
+          <th>End</th>
+          <th>Buys</th>
+          <th>Shares</th>
+          <th>Avg Entry</th>
+          <th>Avg Exit</th>
+          <th>P/L $</th>
+          <th>P/L %</th>
+        </tr>
+      </thead>
+      <tbody id="cycles-body"></tbody>
+    </table>
+    """
+    )
+
+    # -------------------------
+    # JS: load cycles every 15s (no full-page refresh)
+    # FIX 3: disable cache so data updates reliably
+    # -------------------------
+    html.append(
+        """
+    <script>
+    async function loadCycles() {
+      try {
+        const res = await fetch("/cycles", { cache: "no-store" });
+        const data = await res.json();
+
+        if (!data.ok) {
+          console.error("Cycles load failed", data);
+          return;
+        }
+
+        const tbody = document.getElementById("cycles-body");
+        if (!tbody) return;
+
+        tbody.innerHTML = "";
+
+        data.cycles.forEach((c, i) => {
+          const row = document.createElement("tr");
+          row.innerHTML = `
+            <td>${i + 1}</td>
+            <td>${c.anchor_time ?? ""}</td>
+            <td>${c.sell_time ?? ""}</td>
+            <td>${c.buy_orders ?? ""}</td>
+            <td>${c.shares ?? ""}</td>
+            <td>${c.avg_entry != null ? "$" + c.avg_entry : ""}</td>
+            <td>${c.avg_exit != null ? "$" + c.avg_exit : ""}</td>
+            <td>${c.realized_pl != null ? "$" + c.realized_pl : ""}</td>
+            <td>${c.realized_pl_pct != null ? c.realized_pl_pct + "%" : ""}</td>
+          `;
+          tbody.appendChild(row);
+        });
+      } catch (e) {
+        console.error("Cycles exception", e);
+      }
+    }
+
+    loadCycles();
+    setInterval(loadCycles, 15000);
+    </script>
+    """
+    )
+
+    html.append("</body></html>")
     return Response("\n".join(html), mimetype="text/html")
