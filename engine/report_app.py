@@ -62,13 +62,23 @@ def fmt_ct_any(ts):
         dt = _parse_iso_time(ts)
         return to_central(dt) if dt else ts
     return to_central(ts)
-    
+
+
 # --- Money formatting helper ---
 def money(x):
     try:
         return f"{float(x):,.2f}"
     except Exception:
         return str(x)
+
+
+def money0(x):
+    """Money formatter with 0 decimals (for BP numbers if desired)."""
+    try:
+        return f"{float(x):,.0f}"
+    except Exception:
+        return str(x)
+
 
 # -------------------------
 # Aggregation + Cycles
@@ -77,6 +87,7 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
     """
     Turn Alpaca FILL activities into one row per order_id.
     Filters to TSLA buys by default.
+    Returns rows sorted newest-first.
     """
     grouped = {}
 
@@ -111,7 +122,7 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
         g["filled_qty"] += qty
         g["pv"] += qty * price
 
-        # keep earliest time if comparable
+        # keep earliest time if comparable (rarely needed)
         if ts and g["time"] and ts < g["time"]:
             g["time"] = ts
 
@@ -132,7 +143,7 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
             }
         )
 
-    rows.sort(key=lambda r: r["time"], reverse=True)
+    rows.sort(key=lambda r: r["time"], reverse=True)  # newest-first
     return rows
 
 
@@ -193,7 +204,7 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
             }
         )
 
-    rows.sort(key=lambda r: r["time"], reverse=True)
+    rows.sort(key=lambda r: r["time"], reverse=True)  # newest-first
     return rows
 
 
@@ -270,7 +281,6 @@ def build_trade_cycles_from_order_rows(order_rows):
 
             cur = None
 
-    # robust sort using RAW sell time (not formatted CT string)
     def _sell_sort_key(c):
         raw = c.get("sell_time_raw")
         if isinstance(raw, str):
@@ -278,12 +288,11 @@ def build_trade_cycles_from_order_rows(order_rows):
             return dt or datetime.min
         return raw or datetime.min
 
-    cycles.sort(key=_sell_sort_key, reverse=True)
+    cycles.sort(key=_sell_sort_key, reverse=True)  # newest-first
     return cycles
 
 
 def compute_cycles(days=30, symbol="TSLA"):
-    """Shared cycles engine (so /cycles and other callers reuse identical logic)."""
     after = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
     acts = api.get_activities(activity_types="FILL", after=after)
     orders = aggregate_fills_all_sides_by_order_id(acts, only_symbol=symbol)
@@ -335,19 +344,21 @@ def report():
         data = {
             "ok": True,
             "account": {
-            "equity": float(_get_attr(acct, "equity", 0) or 0),
-            "cash": float(_get_attr(acct, "cash", 0) or 0),
-            "buying_power": float(_get_attr(acct, "buying_power", 0) or 0),
-        
-            # Exposure / margin (these mirror what you see on Alpaca “Balance”)
-            "long_market_value": float(_get_attr(acct, "long_market_value", 0) or 0),
-            "initial_margin": float(_get_attr(acct, "initial_margin", 0) or 0),
-            "maintenance_margin": float(_get_attr(acct, "maintenance_margin", 0) or 0),
-        
-            # Optional (only if present on your account type)
-            "regt_buying_power": float(_get_attr(acct, "regt_buying_power", 0) or 0),
-            "daytrading_buying_power": float(_get_attr(acct, "daytrading_buying_power", 0) or 0),
-        },
+                "equity": float(_get_attr(acct, "equity", 0) or 0),
+                "cash": float(_get_attr(acct, "cash", 0) or 0),
+                "buying_power": float(_get_attr(acct, "buying_power", 0) or 0),
+                "regt_buying_power": float(_get_attr(acct, "regt_buying_power", 0) or 0),
+                "daytrading_buying_power": float(_get_attr(acct, "daytrading_buying_power", 0) or 0),
+
+                # NEW upgrades requested:
+                "effective_buying_power": float(_get_attr(acct, "effective_buying_power", 0) or 0),
+                "non_marginable_buying_power": float(_get_attr(acct, "non_marginable_buying_power", 0) or 0),
+
+                # Exposure / margin
+                "long_market_value": float(_get_attr(acct, "long_market_value", 0) or 0),
+                "initial_margin": float(_get_attr(acct, "initial_margin", 0) or 0),
+                "maintenance_margin": float(_get_attr(acct, "maintenance_margin", 0) or 0),
+            },
             "position": position_data,
         }
 
@@ -381,6 +392,7 @@ def report():
                 tsla_buys_after.append(act)
 
             group_buys = aggregate_fills_by_order_id(tsla_buys_after, only_symbol="TSLA", only_side="buy")
+            # group_buys is newest-first.
 
             active_group = None
             active_group_triggers = []
@@ -451,15 +463,18 @@ def report():
                     "anchor_order_id": anchor_row.get("order_id"),
                 }
 
-                # --- Active Group Triggers table (Excel-style) ---
-                ladder = list(reversed(group_buys))  # oldest-first
+                # --- Active Group Triggers table ---
+                # Build chronological first (oldest-first) so "actual_drop" is computed correctly,
+                # then reverse for display (newest-first).
+                ladder_oldest_first = list(reversed(group_buys))  # oldest-first
                 prev_vwap = None
-                for i, row in enumerate(ladder, start=1):
+                tmp_rows = []
+                for i, row in enumerate(ladder_oldest_first, start=1):
                     vwap = float(row["vwap"])
                     intended_drop = ((i - 1) // 5) + 1 if i > 1 else None
                     actual_drop = round(prev_vwap - vwap, 4) if prev_vwap is not None else None
 
-                    active_group_triggers.append(
+                    tmp_rows.append(
                         {
                             "trigger": i,
                             "time": fmt_ct_any(row.get("time")),
@@ -471,8 +486,10 @@ def report():
                             "order_id": row.get("order_id"),
                         }
                     )
-
                     prev_vwap = vwap
+
+                # Display newest-first (most recent row first)
+                active_group_triggers = list(reversed(tmp_rows))
 
             data["active_group"] = active_group
             data["active_group_triggers"] = active_group_triggers
@@ -489,49 +506,11 @@ def report():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/active_group_triggers")
-def active_group_triggers_only():
-    """Clean endpoint for the ladder JSON."""
-    try:
-        r = report()
-        if isinstance(r, tuple):
-            resp, status = r
-            data = resp.get_json() if hasattr(resp, "get_json") else {}
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": data.get("error", "Report failed"),
-                        "active_group": None,
-                        "active_group_triggers": [],
-                    }
-                ),
-                status,
-            )
-
-        data = r.get_json() if hasattr(r, "get_json") else None
-        if not isinstance(data, dict):
-            return jsonify({"ok": False, "error": "Could not parse report output"}), 500
-
-        return jsonify(
-            {
-                "ok": data.get("ok", False),
-                "error": data.get("error"),
-                "active_group_error": data.get("active_group_error"),
-                "active_group": data.get("active_group", None),
-                "active_group_triggers": data.get("active_group_triggers", []),
-            }
-        )
-
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
 @app.route("/cycles")
 def cycles():
     """
     Closed trade cycles (BUY group -> SELL closes group), derived from Alpaca FILL activities.
-    Returns JSON only.
+    Returns JSON only (newest-first).
     """
     try:
         cyc = compute_cycles(days=30, symbol="TSLA")
@@ -544,10 +523,12 @@ def cycles():
 def table_view():
     """
     HTML dashboard page:
-    - Ladder (server-rendered)
-    - Cycles table (filled by JS fetch to /cycles)
+    - Account (vertical list)
+    - Active Group summary + Position
+    - Ladder (newest-first)
+    - Cycles (newest-first)
+    Auto-refreshes every 15 seconds by fetching /report and /cycles.
     """
-    # FIX: report() may return (resp, status) tuple on error
     r = report()
     if isinstance(r, tuple):
         resp, _status = r
@@ -562,18 +543,22 @@ def table_view():
 
     html = []
 
-    # FIX: remove meta refresh entirely (avoid any browser weirdness)
     html.append("<html><head><title>TSLA Ladder</title>")
     html.append(
         """
     <style>
       body { font-family: Arial, sans-serif; padding: 16px; }
       .box { padding: 12px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; }
+      .row { margin: 4px 0; }
+      .muted { color: #666; }
       table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
       th, td { border: 1px solid #ddd; padding: 8px; text-align: right; }
       th { background: #f5f5f5; text-align: right; }
       td:first-child, th:first-child { text-align: center; }
       td:nth-child(2), th:nth-child(2) { text-align: left; }
+      .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
+      @media (min-width: 900px) { .split { grid-template-columns: 1fr 1fr; } }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     </style>
     """
     )
@@ -582,42 +567,87 @@ def table_view():
     # Last updated timestamp (Central Time)
     now_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
 
-    # Header summary
+    # -------------------------
+    # Top summary box (Active Group + Position)
+    # -------------------------
     html.append('<div class="box">')
-    html.append(f"<b>Last updated:</b> {now_ct}<br><br>")
-    html.append(f"<b>Anchor:</b> {ag.get('anchor_vwap')} @ {ag.get('anchor_time')}<br>")
+    html.append(f"<div class='row'><b>Last updated:</b> <span id='last-updated'>{now_ct}</span></div>")
+    html.append("<br>")
+
     html.append(
-        f"<b>Sell Target:</b> {ag.get('sell_target')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_sell')}<br>"
+        "<div class='row'>"
+        f"<b>Anchor:</b> <span id='ag-anchor-vwap'>{ag.get('anchor_vwap')}</span> "
+        f"@ <span id='ag-anchor-time'>{ag.get('anchor_time')}</span>"
+        "</div>"
     )
     html.append(
-        f"<b>Next Buy:</b> {ag.get('next_buy_price')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_next_buy')}<br>"
+        "<div class='row'>"
+        f"<b>Sell Target:</b> <span id='ag-sell-target'>{ag.get('sell_target')}</span>"
+        f" &nbsp;&nbsp; <b>Distance:</b> <span id='ag-distance-sell'>{ag.get('distance_to_sell')}</span>"
+        "</div>"
     )
-    html.append(f"<b>Buys:</b> {ag.get('buys_count')} &nbsp;&nbsp; <b>Drop Increment:</b> {ag.get('drop_increment')}")
-    
-    # --- TSLA Position ---
+    html.append(
+        "<div class='row'>"
+        f"<b>Next Buy:</b> <span id='ag-next-buy'>{ag.get('next_buy_price')}</span>"
+        f" &nbsp;&nbsp; <b>Distance:</b> <span id='ag-distance-next'>{ag.get('distance_to_next_buy')}</span>"
+        "</div>"
+    )
+    html.append(
+        "<div class='row'>"
+        f"<b>Buys:</b> <span id='ag-buys'>{ag.get('buys_count')}</span>"
+        f" &nbsp;&nbsp; <b>Drop Increment:</b> <span id='ag-drop-inc'>{ag.get('drop_increment')}</span>"
+        "</div>"
+    )
+
     if pos:
-        html.append("<br><br><b>TSLA Position:</b><br>")
+        html.append("<br><div class='row'><b>TSLA Position:</b></div>")
         html.append(
-            f"Qty: {pos.get('qty')} &nbsp;&nbsp; "
-            f"Avg: ${money(pos.get('avg_entry'))} &nbsp;&nbsp; "
-            f"Mkt Val: ${money(pos.get('market_value'))} &nbsp;&nbsp; "
-            f"uP/L: ${money(pos.get('unrealized_pl'))}"
+            "<div class='row mono'>"
+            f"Qty: <span id='pos-qty'>{pos.get('qty')}</span> &nbsp;&nbsp; "
+            f"Avg: $<span id='pos-avg'>{money(pos.get('avg_entry'))}</span> &nbsp;&nbsp; "
+            f"Mkt Val: $<span id='pos-mv'>{money(pos.get('market_value'))}</span> &nbsp;&nbsp; "
+            f"uP/L: $<span id='pos-upl'>{money(pos.get('unrealized_pl'))}</span>"
+            "</div>"
         )
-        
+
     html.append("</div>")
-    html.append("<hr style='margin:10px 0;'>")
-    html.append("<b>Account:</b><br>")
-    html.append(f"Equity: ${acct.get('equity')} &nbsp;&nbsp; Cash: ${acct.get('cash')} &nbsp;&nbsp; Buying Power: ${acct.get('buying_power')}<br>")
-    html.append(f"Long Mkt Value: ${acct.get('long_market_value')} &nbsp;&nbsp; Init Margin: ${acct.get('initial_margin')} &nbsp;&nbsp; Maint Margin: ${acct.get('maintenance_margin')}<br>")
-    html.append(f"Reg-T BP: ${acct.get('regt_buying_power')} &nbsp;&nbsp; DT BP: ${acct.get('daytrading_buying_power')}<br>")
 
     # -------------------------
-    # Ladder table (FIRST)
+    # Account box (vertical list)
+    # -------------------------
+    html.append("<div class='box'>")
+    html.append("<div class='row'><b>Account</b></div>")
+    html.append("<div class='row muted'>Updates every 15 seconds (time-based), independent of trade activity.</div>")
+    html.append("<br>")
+
+    def acct_line(label, key, fmt="money"):
+        val = acct.get(key)
+        if fmt == "money0":
+            sval = money0(val)
+        else:
+            sval = money(val)
+        return f"<div class='row mono'>{label}: $<span id='acct-{key}'>{sval}</span></div>"
+
+    html.append(acct_line("Equity", "equity"))
+    html.append(acct_line("Cash", "cash"))
+    html.append(acct_line("Buying Power", "buying_power", fmt="money0"))
+    html.append(acct_line("RegT Buying Power", "regt_buying_power", fmt="money0"))
+    html.append(acct_line("Day Trading Buying Power", "daytrading_buying_power", fmt="money0"))
+    html.append(acct_line("Effective Buying Power", "effective_buying_power", fmt="money0"))
+    html.append(acct_line("Non-Marginable Buying Power", "non_marginable_buying_power", fmt="money0"))
+    html.append("<br>")
+    html.append(acct_line("Long Market Value", "long_market_value"))
+    html.append(acct_line("Initial Margin", "initial_margin"))
+    html.append(acct_line("Maintenance Margin", "maintenance_margin"))
+    html.append("</div>")
+
+    # -------------------------
+    # Ladder table
     # -------------------------
     html.append("<h2>Active Group Ladder</h2>")
     html.append("<table>")
     html.append(
-        "<tr>"
+        "<thead><tr>"
         "<th>#</th>"
         "<th>Time (CT)</th>"
         "<th>Shares</th>"
@@ -625,9 +655,11 @@ def table_view():
         "<th>Avg Price</th>"
         "<th>Intended Drop</th>"
         "<th>Actual Drop</th>"
-        "</tr>"
+        "</tr></thead>"
     )
+    html.append("<tbody id='ladder-body'>")
 
+    # rows already newest-first (report() prepares newest-first)
     for row in rows:
         html.append(
             "<tr>"
@@ -641,7 +673,8 @@ def table_view():
             "</tr>"
         )
 
-    # Add "next buy" ghost row
+    # Add "next buy" ghost row at the TOP? (you previously had it at the bottom)
+    # We'll keep it at the bottom to avoid confusion: it's not a completed trigger.
     if ag and ag.get("next_buy_price") is not None and ag.get("buys_count") is not None:
         next_trigger = int(ag["buys_count"]) + 1
         intended_drop_next = ((next_trigger - 1) // 5) + 1
@@ -657,10 +690,10 @@ def table_view():
             "</tr>"
         )
 
-    html.append("</table>")
+    html.append("</tbody></table>")
 
     # -------------------------
-    # Cycles table (SECOND)
+    # Cycles table
     # -------------------------
     html.append("<h2>Closed Trade Cycles</h2>")
     html.append(
@@ -685,26 +718,137 @@ def table_view():
     )
 
     # -------------------------
-    # JS: load cycles every 15s (no full-page refresh)
+    # JS: refresh /report + /cycles every 15s (no full-page refresh)
     # -------------------------
     html.append(
         """
     <script>
+    const REFRESH_MS = 15000;
+
+    function fmtMoney(x) {
+      if (x == null || x === "") return "";
+      const n = Number(x);
+      if (Number.isNaN(n)) return String(x);
+      return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+
+    function fmtMoney0(x) {
+      if (x == null || x === "") return "";
+      const n = Number(x);
+      if (Number.isNaN(n)) return String(x);
+      return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    }
+
+    async function refreshReport() {
+      try {
+        const res = await fetch(("/report") + "?t=" + Date.now(), { cache: "no-store" });
+        const data = await res.json();
+        if (!data.ok) return;
+
+        // last updated (client-side)
+        const lu = document.getElementById("last-updated");
+        if (lu) {
+          // server already returns CT in rendered version; for refresh we show local timestamp string
+          lu.textContent = new Date().toLocaleString();
+        }
+
+        // Active group fields
+        const ag = data.active_group || {};
+        const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v ?? ""); };
+
+        setText("ag-anchor-vwap", ag.anchor_vwap);
+        setText("ag-anchor-time", ag.anchor_time);
+        setText("ag-sell-target", ag.sell_target);
+        setText("ag-distance-sell", ag.distance_to_sell);
+        setText("ag-next-buy", ag.next_buy_price);
+        setText("ag-distance-next", ag.distance_to_next_buy);
+        setText("ag-buys", ag.buys_count);
+        setText("ag-drop-inc", ag.drop_increment);
+
+        // Position
+        const pos = data.position || {};
+        if (pos && Object.keys(pos).length) {
+          setText("pos-qty", pos.qty);
+          setText("pos-avg", fmtMoney(pos.avg_entry));
+          setText("pos-mv", fmtMoney(pos.market_value));
+          setText("pos-upl", fmtMoney(pos.unrealized_pl));
+        }
+
+        // Account
+        const acct = data.account || {};
+        const setAcct = (key, fmt0=false) => {
+          const el = document.getElementById("acct-" + key);
+          if (!el) return;
+          el.textContent = fmt0 ? fmtMoney0(acct[key]) : fmtMoney(acct[key]);
+        };
+
+        setAcct("equity");
+        setAcct("cash");
+        setAcct("buying_power", true);
+        setAcct("regt_buying_power", true);
+        setAcct("daytrading_buying_power", true);
+        setAcct("effective_buying_power", true);
+        setAcct("non_marginable_buying_power", true);
+        setAcct("long_market_value");
+        setAcct("initial_margin");
+        setAcct("maintenance_margin");
+
+        // Ladder (newest-first)
+        const ladderBody = document.getElementById("ladder-body");
+        if (ladderBody) {
+          ladderBody.innerHTML = "";
+
+          const rows = data.active_group_triggers || [];
+          rows.forEach((r) => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td>${r.trigger ?? ""}</td>
+              <td>${r.time ?? ""}</td>
+              <td>${r.shares ?? ""}</td>
+              <td>${r.total_dollars ?? ""}</td>
+              <td>${r.avg_price ?? ""}</td>
+              <td>${r.intended_drop ?? ""}</td>
+              <td>${r.actual_drop ?? ""}</td>
+            `;
+            ladderBody.appendChild(tr);
+          });
+
+          // waiting row (keep at bottom)
+          if (ag && ag.next_buy_price != null && ag.buys_count != null) {
+            const nextTrigger = Number(ag.buys_count) + 1;
+            const intendedDropNext = Math.floor((nextTrigger - 1) / 5) + 1;
+
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td><b>${nextTrigger}</b></td>
+              <td><b>WAITING</b></td>
+              <td>12</td>
+              <td>—</td>
+              <td><b>${ag.next_buy_price}</b></td>
+              <td><b>${intendedDropNext}</b></td>
+              <td>—</td>
+            `;
+            ladderBody.appendChild(tr);
+          }
+        }
+
+      } catch (e) {
+        console.error("refreshReport exception", e);
+      }
+    }
+
     async function loadCycles() {
       try {
-        const res = await fetch("/cycles", { cache: "no-store" });
+        const res = await fetch(("/cycles") + "?t=" + Date.now(), { cache: "no-store" });
         const data = await res.json();
-
-        if (!data.ok) {
-          console.error("Cycles load failed", data);
-          return;
-        }
+        if (!data.ok) return;
 
         const tbody = document.getElementById("cycles-body");
         if (!tbody) return;
 
         tbody.innerHTML = "";
 
+        // data.cycles is already newest-first (server-side sort)
         data.cycles.forEach((c, i) => {
           const row = document.createElement("tr");
           row.innerHTML = `
@@ -721,12 +865,19 @@ def table_view():
           tbody.appendChild(row);
         });
       } catch (e) {
-        console.error("Cycles exception", e);
+        console.error("loadCycles exception", e);
       }
     }
 
+    // Initial load
+    refreshReport();
     loadCycles();
-    setInterval(loadCycles, 15000);
+
+    // Auto-refresh loop (time-based)
+    setInterval(() => {
+      refreshReport();
+      loadCycles();
+    }, REFRESH_MS);
     </script>
     """
     )
