@@ -62,7 +62,13 @@ def fmt_ct_any(ts):
         dt = _parse_iso_time(ts)
         return to_central(dt) if dt else ts
     return to_central(ts)
-
+    
+# --- Money formatting helper ---
+def money(x):
+    try:
+        return f"{float(x):,.2f}"
+    except Exception:
+        return str(x)
 
 # -------------------------
 # Aggregation + Cycles
@@ -329,10 +335,19 @@ def report():
         data = {
             "ok": True,
             "account": {
-                "equity": float(acct.equity),
-                "cash": float(acct.cash),
-                "buying_power": float(acct.buying_power),
-            },
+            "equity": float(_get_attr(acct, "equity", 0) or 0),
+            "cash": float(_get_attr(acct, "cash", 0) or 0),
+            "buying_power": float(_get_attr(acct, "buying_power", 0) or 0),
+        
+            # Exposure / margin (these mirror what you see on Alpaca “Balance”)
+            "long_market_value": float(_get_attr(acct, "long_market_value", 0) or 0),
+            "initial_margin": float(_get_attr(acct, "initial_margin", 0) or 0),
+            "maintenance_margin": float(_get_attr(acct, "maintenance_margin", 0) or 0),
+        
+            # Optional (only if present on your account type)
+            "regt_buying_power": float(_get_attr(acct, "regt_buying_power", 0) or 0),
+            "daytrading_buying_power": float(_get_attr(acct, "daytrading_buying_power", 0) or 0),
+        },
             "position": position_data,
         }
 
@@ -542,6 +557,8 @@ def table_view():
 
     ag = data.get("active_group") or {}
     rows = data.get("active_group_triggers") or []
+    acct = data.get("account") or {}
+    pos = data.get("position") or {}
 
     html = []
 
@@ -576,7 +593,23 @@ def table_view():
         f"<b>Next Buy:</b> {ag.get('next_buy_price')} &nbsp;&nbsp; <b>Distance:</b> {ag.get('distance_to_next_buy')}<br>"
     )
     html.append(f"<b>Buys:</b> {ag.get('buys_count')} &nbsp;&nbsp; <b>Drop Increment:</b> {ag.get('drop_increment')}")
+    
+    # --- TSLA Position ---
+    if pos:
+        html.append("<br><br><b>TSLA Position:</b><br>")
+        html.append(
+            f"Qty: {pos.get('qty')} &nbsp;&nbsp; "
+            f"Avg: ${money(pos.get('avg_entry'))} &nbsp;&nbsp; "
+            f"Mkt Val: ${money(pos.get('market_value'))} &nbsp;&nbsp; "
+            f"uP/L: ${money(pos.get('unrealized_pl'))}"
+        )
+        
     html.append("</div>")
+    html.append("<hr style='margin:10px 0;'>")
+    html.append("<b>Account:</b><br>")
+    html.append(f"Equity: ${acct.get('equity')} &nbsp;&nbsp; Cash: ${acct.get('cash')} &nbsp;&nbsp; Buying Power: ${acct.get('buying_power')}<br>")
+    html.append(f"Long Mkt Value: ${acct.get('long_market_value')} &nbsp;&nbsp; Init Margin: ${acct.get('initial_margin')} &nbsp;&nbsp; Maint Margin: ${acct.get('maintenance_margin')}<br>")
+    html.append(f"Reg-T BP: ${acct.get('regt_buying_power')} &nbsp;&nbsp; DT BP: ${acct.get('daytrading_buying_power')}<br>")
 
     # -------------------------
     # Ladder table (FIRST)
