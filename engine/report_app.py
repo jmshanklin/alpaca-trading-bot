@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import alpaca_trade_api as tradeapi
 import pytz
 from flask import Flask, Response, jsonify
+from twilio.rest import Client
 
 app = Flask(__name__)
 
@@ -13,6 +14,18 @@ API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 BASE_URL = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
 api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
 
+# -------------------------
+# SMS (Twilio) config
+# -------------------------
+ENABLE_SMS_ALERTS = os.getenv("ENABLE_SMS_ALERTS", "0") == "1"
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
+MY_PHONE_NUMBER = os.getenv("MY_PHONE_NUMBER")  # must be like +1XXXXXXXXXX
+
+def twilio_ready():
+    return all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, MY_PHONE_NUMBER])
 
 # -------------------------
 # Helpers
@@ -322,7 +335,22 @@ def get_tsla_price_fallback():
 @app.route("/")
 def home():
     return "Alpaca Report Service Running"
-
+    
+@app.route("/sms_status")
+def sms_status():
+    """
+    Safety endpoint: shows whether SMS is enabled + whether Twilio env vars are present.
+    Does NOT send any SMS.
+    """
+    return jsonify(
+        {
+            "ok": True,
+            "enable_sms_alerts": ENABLE_SMS_ALERTS,
+            "twilio_ready": twilio_ready(),
+            "twilio_from_number": TWILIO_FROM_NUMBER,
+            "my_phone_number_last4": (MY_PHONE_NUMBER[-4:] if MY_PHONE_NUMBER else None),
+        }
+    )
 
 @app.route("/report")
 def report():
