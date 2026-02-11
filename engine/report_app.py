@@ -555,21 +555,47 @@ def table_view():
       th { background: #f5f5f5; text-align: right; }
       td:first-child, th:first-child { text-align: center; }
       td:nth-child(2), th:nth-child(2) { text-align: left; }
-     /* BIG live TSLA price banner */
-     .price-banner {
-       font-size: 42px;
-       font-weight: bold;
-       text-align: center;
-       margin-bottom: 10px;
-     }
+      /* BIG live TSLA price banner */
+      .price-banner {
+        font-size: 42px;
+        font-weight: bold;
+        text-align: center;
+        margin-bottom: 10px;
+      }
     
-     .price-label {
-       font-size: 16px;
-       color: #666;
-       text-align: center;
-       margin-bottom: 4px;
-     }
-     </style>
+      .price-label {
+        font-size: 16px;
+        color: #666;
+        text-align: center;
+        margin-bottom: 4px;
+      }
+
+      /* Top row: Account (left) + Summary (right), centered as a pair */
+      .top-row {
+        display: flex;
+        justify-content: center;
+        gap: 24px;
+        align-items: flex-start;
+        margin-bottom: 16px;
+      }
+
+      /* Summary box width to match Account feel */
+      .summary-grid {
+        max-width: 400px;   /* match your acct-grid max-width */
+        width: 100%;
+      }
+
+      /* 2-column rows for the Summary box (same idea as Account) */
+      .sum-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 16px;
+        padding: 2px 0;
+      }
+      .sum-label { text-align: left; }
+      .sum-value { text-align: right; font-variant-numeric: tabular-nums; }
+
+    </style>
 
     """
     )
@@ -577,6 +603,8 @@ def table_view():
 
     # Last updated timestamp (Central Time)
     now_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
+
+    html.append("<div class='top-row'>")
 
     # -------------------------
     # Top summary box (Active Group + Position)
@@ -624,6 +652,7 @@ def table_view():
         )
 
     html.append("</div>")
+    html.append("</div>")   # closes the top-row container
 
     # -------------------------
     # Account box (2-column grid, same font)
