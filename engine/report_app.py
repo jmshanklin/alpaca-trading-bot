@@ -310,7 +310,6 @@ def get_tsla_price_fallback():
     """
     try:
         t = api.get_latest_trade("TSLA")
-        # alpaca_trade_api often returns an object with .price
         p = _get_attr(t, "price", None)
         return float(p) if p is not None else None
     except Exception:
@@ -512,6 +511,7 @@ def table_view():
     """
     HTML dashboard page:
     - Big TSLA price banner (top)
+    - Potential Profit box (Total + Per-share) (updates every 15 seconds)
     - Account + Summary boxes side-by-side (centered as a pair)
     - Ladder with WAITING row at TOP + newest fills below
     - Cycles newest-first
@@ -547,10 +547,17 @@ def table_view():
       td:nth-child(2), th:nth-child(2) { text-align: left; }
 
       /* BIG live TSLA price banner */
-      .price-wrap { display: flex; justify-content: center; margin-bottom: 16px; }
+      .price-wrap { display: flex; justify-content: center; margin-bottom: 12px; }
       .price-box { max-width: 520px; width: 100%; text-align: center; }
       .price-label { font-size: 16px; color: #666; margin-bottom: 4px; }
       .price-banner { font-size: 42px; font-weight: bold; margin-bottom: 4px; }
+
+      /* Small metric box (Potential Profit) */
+      .metric-wrap { display: flex; justify-content: center; margin: 0 0 16px; }
+      .metric-box { max-width: 520px; width: 100%; text-align: center; }
+      .metric-title { font-size: 16px; color: #666; margin-bottom: 6px; }
+      .metric-value { font-size: 28px; font-weight: bold; margin-bottom: 4px; }
+      .metric-sub { font-size: 14px; color: #666; }
 
       /* Top row: Account (left) + Summary (right), centered as a pair */
       .top-row {
@@ -598,6 +605,17 @@ def table_view():
     html.append("</div>")
 
     # -------------------------
+    # Potential Profit (to Sell Target) (TOTAL + PER SHARE)
+    # -------------------------
+    html.append("<div class='metric-wrap'>")
+    html.append("<div class='box metric-box'>")
+    html.append("<div class='metric-title'>Potential Profit (to Sell Target)</div>")
+    html.append("<div class='metric-value'>$<span id='potential-profit'></span></div>")
+    html.append("<div class='metric-sub'>Per share: $<span id='potential-per-share'></span></div>")
+    html.append("</div>")
+    html.append("</div>")
+
+    # -------------------------
     # Side-by-side boxes: Account (left) + Summary (right)
     # -------------------------
     html.append("<div class='top-row'>")
@@ -638,7 +656,6 @@ def table_view():
     html.append("<div class='box-sub'>Bot status + ladder metrics (updates every 15 seconds).</div>")
 
     def sum_row(label, value, value_id=None, prefix=""):
-        # value_id is optional span id for JS updates
         v = value if value is not None else ""
         if value_id:
             return (
@@ -654,7 +671,6 @@ def table_view():
             "</div>"
         )
 
-    # Last updated (server time CT)
     html.append(sum_row("Last updated", data.get("server_time_ct", ""), "last-updated"))
 
     html.append("<div class='section-gap'></div>")
@@ -777,6 +793,11 @@ def table_view():
       return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
     }
 
+    function num(x) {
+      const n = Number(x);
+      return Number.isFinite(n) ? n : null;
+    }
+
     function setText(id, v) {
       const el = document.getElementById(id);
       if (el) el.textContent = (v ?? "");
@@ -813,6 +834,22 @@ def table_view():
           setText("pos-mv", fmtMoney(pos.market_value));
           setText("pos-upl", fmtMoney(pos.unrealized_pl));
         }
+
+        // Potential Profit box:
+        // (Sell Target - Avg Entry) * Qty, plus per-share
+        const sellTarget = num(ag.sell_target);
+        const avgEntry = num(pos.avg_entry);
+        const qty = num(pos.qty);
+
+        let perShare = "";
+        let total = "";
+        if (sellTarget != null && avgEntry != null && qty != null) {
+          const ps = (sellTarget - avgEntry);
+          perShare = fmtMoney(ps);
+          total = fmtMoney(ps * qty);
+        }
+        setText("potential-per-share", perShare);
+        setText("potential-profit", total);
 
         // Account
         const acct = data.account || {};
@@ -929,6 +966,4 @@ def table_view():
 
 
 if __name__ == "__main__":
-    # Local dev convenience:
-    # export FLASK_ENV=development (or set debug=True below)
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
