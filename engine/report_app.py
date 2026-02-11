@@ -122,7 +122,7 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
         g["filled_qty"] += qty
         g["pv"] += qty * price
 
-        # keep earliest time if comparable (rarely needed)
+        # keep earliest time if comparable
         if ts and g["time"] and ts < g["time"]:
             g["time"] = ts
 
@@ -212,8 +212,7 @@ def build_trade_cycles_from_order_rows(order_rows):
     """
     Build closed trade cycles from aggregated order rows.
     Assumes your bot: multiple BUY orders -> one SELL order closes the group.
-    Input: order_rows (newest-first or oldest-first OK)
-    Output: cycles newest-first
+    Output: cycles newest-first.
     """
     ordered = list(reversed(order_rows))  # oldest-first
 
@@ -349,12 +348,8 @@ def report():
                 "buying_power": float(_get_attr(acct, "buying_power", 0) or 0),
                 "regt_buying_power": float(_get_attr(acct, "regt_buying_power", 0) or 0),
                 "daytrading_buying_power": float(_get_attr(acct, "daytrading_buying_power", 0) or 0),
-
-                # NEW upgrades requested:
                 "effective_buying_power": float(_get_attr(acct, "effective_buying_power", 0) or 0),
                 "non_marginable_buying_power": float(_get_attr(acct, "non_marginable_buying_power", 0) or 0),
-
-                # Exposure / margin
                 "long_market_value": float(_get_attr(acct, "long_market_value", 0) or 0),
                 "initial_margin": float(_get_attr(acct, "initial_margin", 0) or 0),
                 "maintenance_margin": float(_get_attr(acct, "maintenance_margin", 0) or 0),
@@ -392,7 +387,7 @@ def report():
                 tsla_buys_after.append(act)
 
             group_buys = aggregate_fills_by_order_id(tsla_buys_after, only_symbol="TSLA", only_side="buy")
-            # group_buys is newest-first.
+            # group_buys is newest-first
 
             active_group = None
             active_group_triggers = []
@@ -463,9 +458,7 @@ def report():
                     "anchor_order_id": anchor_row.get("order_id"),
                 }
 
-                # --- Active Group Triggers table ---
-                # Build chronological first (oldest-first) so "actual_drop" is computed correctly,
-                # then reverse for display (newest-first).
+                # Build chronological first (oldest-first) so actual_drop is correct.
                 ladder_oldest_first = list(reversed(group_buys))  # oldest-first
                 prev_vwap = None
                 tmp_rows = []
@@ -488,7 +481,7 @@ def report():
                     )
                     prev_vwap = vwap
 
-                # Display newest-first (most recent row first)
+                # Display newest-first (most recent fill first)
                 active_group_triggers = list(reversed(tmp_rows))
 
             data["active_group"] = active_group
@@ -508,10 +501,7 @@ def report():
 
 @app.route("/cycles")
 def cycles():
-    """
-    Closed trade cycles (BUY group -> SELL closes group), derived from Alpaca FILL activities.
-    Returns JSON only (newest-first).
-    """
+    """Closed trade cycles (newest-first)."""
     try:
         cyc = compute_cycles(days=30, symbol="TSLA")
         return jsonify({"ok": True, "cycles": cyc})
@@ -523,9 +513,9 @@ def cycles():
 def table_view():
     """
     HTML dashboard page:
-    - Account (vertical list)
+    - Account (vertical list, same font as rest)
     - Active Group summary + Position
-    - Ladder (newest-first)
+    - Ladder (WAITING row at TOP + newest fills below)
     - Cycles (newest-first)
     Auto-refreshes every 15 seconds by fetching /report and /cycles.
     """
@@ -537,12 +527,11 @@ def table_view():
         data = r.get_json() if hasattr(r, "get_json") else {}
 
     ag = data.get("active_group") or {}
-    rows = data.get("active_group_triggers") or []
+    rows = data.get("active_group_triggers") or []  # newest-first fills
     acct = data.get("account") or {}
     pos = data.get("position") or {}
 
     html = []
-
     html.append("<html><head><title>TSLA Ladder</title>")
     html.append(
         """
@@ -556,9 +545,6 @@ def table_view():
       th { background: #f5f5f5; text-align: right; }
       td:first-child, th:first-child { text-align: center; }
       td:nth-child(2), th:nth-child(2) { text-align: left; }
-      .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
-      @media (min-width: 900px) { .split { grid-template-columns: 1fr 1fr; } }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     </style>
     """
     )
@@ -602,7 +588,7 @@ def table_view():
     if pos:
         html.append("<br><div class='row'><b>TSLA Position:</b></div>")
         html.append(
-            "<div class='row mono'>"
+            "<div class='row'>"
             f"Qty: <span id='pos-qty'>{pos.get('qty')}</span> &nbsp;&nbsp; "
             f"Avg: $<span id='pos-avg'>{money(pos.get('avg_entry'))}</span> &nbsp;&nbsp; "
             f"Mkt Val: $<span id='pos-mv'>{money(pos.get('market_value'))}</span> &nbsp;&nbsp; "
@@ -613,7 +599,7 @@ def table_view():
     html.append("</div>")
 
     # -------------------------
-    # Account box (vertical list)
+    # Account box (vertical list, SAME FONT)
     # -------------------------
     html.append("<div class='box'>")
     html.append("<div class='row'><b>Account</b></div>")
@@ -622,11 +608,8 @@ def table_view():
 
     def acct_line(label, key, fmt="money"):
         val = acct.get(key)
-        if fmt == "money0":
-            sval = money0(val)
-        else:
-            sval = money(val)
-        return f"<div class='row mono'>{label}: $<span id='acct-{key}'>{sval}</span></div>"
+        sval = money0(val) if fmt == "money0" else money(val)
+        return f"<div class='row'>{label}: $<span id='acct-{key}'>{sval}</span></div>"
 
     html.append(acct_line("Equity", "equity"))
     html.append(acct_line("Cash", "cash"))
@@ -642,7 +625,7 @@ def table_view():
     html.append("</div>")
 
     # -------------------------
-    # Ladder table
+    # Ladder table (WAITING row at TOP)
     # -------------------------
     html.append("<h2>Active Group Ladder</h2>")
     html.append("<table>")
@@ -659,22 +642,7 @@ def table_view():
     )
     html.append("<tbody id='ladder-body'>")
 
-    # rows already newest-first (report() prepares newest-first)
-    for row in rows:
-        html.append(
-            "<tr>"
-            f"<td>{row.get('trigger')}</td>"
-            f"<td>{row.get('time')}</td>"
-            f"<td>{row.get('shares')}</td>"
-            f"<td>{row.get('total_dollars')}</td>"
-            f"<td>{row.get('avg_price')}</td>"
-            f"<td>{row.get('intended_drop')}</td>"
-            f"<td>{row.get('actual_drop')}</td>"
-            "</tr>"
-        )
-
-    # Add "next buy" ghost row at the TOP? (you previously had it at the bottom)
-    # We'll keep it at the bottom to avoid confusion: it's not a completed trigger.
+    # WAITING row at TOP
     if ag and ag.get("next_buy_price") is not None and ag.get("buys_count") is not None:
         next_trigger = int(ag["buys_count"]) + 1
         intended_drop_next = ((next_trigger - 1) // 5) + 1
@@ -687,6 +655,20 @@ def table_view():
             f"<td><b>{ag.get('next_buy_price')}</b></td>"
             f"<td><b>{intended_drop_next}</b></td>"
             f"<td>—</td>"
+            "</tr>"
+        )
+
+    # Then newest-first filled rows
+    for row in rows:
+        html.append(
+            "<tr>"
+            f"<td>{row.get('trigger')}</td>"
+            f"<td>{row.get('time')}</td>"
+            f"<td>{row.get('shares')}</td>"
+            f"<td>{row.get('total_dollars')}</td>"
+            f"<td>{row.get('avg_price')}</td>"
+            f"<td>{row.get('intended_drop')}</td>"
+            f"<td>{row.get('actual_drop')}</td>"
             "</tr>"
         )
 
@@ -718,7 +700,8 @@ def table_view():
     )
 
     # -------------------------
-    # JS: refresh /report + /cycles every 15s (no full-page refresh)
+    # JS: refresh /report + /cycles every 15s
+    #   - Ladder WAITING row is rendered FIRST (top) on every refresh
     # -------------------------
     html.append(
         """
@@ -741,20 +724,20 @@ def table_view():
 
     async function refreshReport() {
       try {
-        const res = await fetch(("/report") + "?t=" + Date.now(), { cache: "no-store" });
+        const res = await fetch("/report?t=" + Date.now(), { cache: "no-store" });
         const data = await res.json();
         if (!data.ok) return;
 
         // last updated (client-side)
         const lu = document.getElementById("last-updated");
-        if (lu) {
-          // server already returns CT in rendered version; for refresh we show local timestamp string
-          lu.textContent = new Date().toLocaleString();
-        }
+        if (lu) lu.textContent = new Date().toLocaleString();
 
         // Active group fields
         const ag = data.active_group || {};
-        const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = (v ?? ""); };
+        const setText = (id, v) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = (v ?? "");
+        };
 
         setText("ag-anchor-vwap", ag.anchor_vwap);
         setText("ag-anchor-time", ag.anchor_time);
@@ -774,7 +757,7 @@ def table_view():
           setText("pos-upl", fmtMoney(pos.unrealized_pl));
         }
 
-        // Account
+        // Account (same font as body; just update the numbers)
         const acct = data.account || {};
         const setAcct = (key, fmt0=false) => {
           const el = document.getElementById("acct-" + key);
@@ -793,12 +776,32 @@ def table_view():
         setAcct("initial_margin");
         setAcct("maintenance_margin");
 
-        // Ladder (newest-first)
+        // Ladder: WAITING row first, then newest-first fills
         const ladderBody = document.getElementById("ladder-body");
         if (ladderBody) {
           ladderBody.innerHTML = "";
 
-          const rows = data.active_group_triggers || [];
+          const rows = data.active_group_triggers || []; // newest-first fills
+
+          // WAITING row at TOP
+          if (ag && ag.next_buy_price != null && ag.buys_count != null) {
+            const nextTrigger = Number(ag.buys_count) + 1;
+            const intendedDropNext = Math.floor((nextTrigger - 1) / 5) + 1;
+
+            const trW = document.createElement("tr");
+            trW.innerHTML = `
+              <td><b>${nextTrigger}</b></td>
+              <td><b>WAITING</b></td>
+              <td>12</td>
+              <td>—</td>
+              <td><b>${ag.next_buy_price}</b></td>
+              <td><b>${intendedDropNext}</b></td>
+              <td>—</td>
+            `;
+            ladderBody.appendChild(trW);
+          }
+
+          // Then newest-first filled rows
           rows.forEach((r) => {
             const tr = document.createElement("tr");
             tr.innerHTML = `
@@ -812,24 +815,6 @@ def table_view():
             `;
             ladderBody.appendChild(tr);
           });
-
-          // waiting row (keep at bottom)
-          if (ag && ag.next_buy_price != null && ag.buys_count != null) {
-            const nextTrigger = Number(ag.buys_count) + 1;
-            const intendedDropNext = Math.floor((nextTrigger - 1) / 5) + 1;
-
-            const tr = document.createElement("tr");
-            tr.innerHTML = `
-              <td><b>${nextTrigger}</b></td>
-              <td><b>WAITING</b></td>
-              <td>12</td>
-              <td>—</td>
-              <td><b>${ag.next_buy_price}</b></td>
-              <td><b>${intendedDropNext}</b></td>
-              <td>—</td>
-            `;
-            ladderBody.appendChild(tr);
-          }
         }
 
       } catch (e) {
@@ -839,7 +824,7 @@ def table_view():
 
     async function loadCycles() {
       try {
-        const res = await fetch(("/cycles") + "?t=" + Date.now(), { cache: "no-store" });
+        const res = await fetch("/cycles?t=" + Date.now(), { cache: "no-store" });
         const data = await res.json();
         if (!data.ok) return;
 
@@ -848,7 +833,7 @@ def table_view():
 
         tbody.innerHTML = "";
 
-        // data.cycles is already newest-first (server-side sort)
+        // cycles already newest-first
         data.cycles.forEach((c, i) => {
           const row = document.createElement("tr");
           row.innerHTML = `
@@ -873,7 +858,7 @@ def table_view():
     refreshReport();
     loadCycles();
 
-    // Auto-refresh loop (time-based)
+    // Auto-refresh loop
     setInterval(() => {
       refreshReport();
       loadCycles();
