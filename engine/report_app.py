@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import requests
 import alpaca_trade_api as tradeapi
 import pytz
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify
 
 app = Flask(__name__)
 
@@ -23,37 +23,6 @@ api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
 ENABLE_PUSH_ALERTS = os.getenv("ENABLE_PUSH_ALERTS", "0") == "1"
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
-
-# -------------------------
-# OPTIONAL: SECURE MANUAL TEST TRADES (RECOMMENDED)
-# -------------------------
-ENABLE_MANUAL_TRADES = os.getenv("ENABLE_MANUAL_TRADES", "0") == "1"
-TRADE_TOKEN = os.getenv("TRADE_TOKEN", "")
-ALLOW_LIVE_MANUAL_TRADES = os.getenv("ALLOW_LIVE_MANUAL_TRADES", "0") == "1"
-
-
-def _is_paper_url(url: str) -> bool:
-    u = (url or "").lower()
-    return "paper-api.alpaca.markets" in u or "paper" in u
-
-
-def _require_trade_auth() -> tuple[bool, str]:
-    """Return (ok, message). Requires ENABLE_MANUAL_TRADES=1 and token match."""
-    if not ENABLE_MANUAL_TRADES:
-        return False, "Manual trades are disabled (set ENABLE_MANUAL_TRADES=1)."
-
-    if not TRADE_TOKEN:
-        return False, "TRADE_TOKEN is not set on the server."
-
-    supplied = request.headers.get("X-TRADE-TOKEN", "")
-    if supplied != TRADE_TOKEN:
-        return False, "Unauthorized (missing/invalid X-TRADE-TOKEN)."
-
-    # Protect live by default unless explicitly allowed
-    if (not _is_paper_url(BASE_URL)) and (not ALLOW_LIVE_MANUAL_TRADES):
-        return False, "Live manual trades blocked (set ALLOW_LIVE_MANUAL_TRADES=1 to enable)."
-
-    return True, "ok"
 
 
 def send_push(title: str, message: str):
@@ -97,22 +66,9 @@ WATCHER_STATUS = {
 }
 
 
-def _load_push_state():
-    try:
-        with open(_PUSH_STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_push_state(state: dict):
-    try:
-        with open(_PUSH_STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f)
-    except Exception:
-        pass
-
-
+# -------------------------
+# Helpers
+# -------------------------
 def _get_attr(obj, name, default=None):
     """Works whether Alpaca returns an object or dict-like."""
     try:
@@ -126,10 +82,47 @@ def _get_attr(obj, name, default=None):
 
 
 def _parse_iso_time(s):
+    """Parse ISO timestamps; returns timezone-aware datetime when possible."""
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        # Handles "...Z" and "+00:00"
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _as_dt(ts):
+    """
+    Normalize Alpaca time values to a timezone-aware datetime.
+    Handles:
+      - datetime
+      - ISO string
+      - pandas Timestamp-like objects (has .to_pydatetime())
+    """
+    if ts is None:
+        return None
+
+    # pandas Timestamp or similar
+    try:
+        if hasattr(ts, "to_pydatetime"):
+            ts = ts.to_pydatetime()
+    except Exception:
+        pass
+
+    # ISO string
+    if isinstance(ts, str):
+        ts = _parse_iso_time(ts)
+
+    if not isinstance(ts, datetime):
+        return None
+
+    # Ensure tz-aware (assume UTC if missing)
+    try:
+        if ts.tzinfo is None:
+            ts = pytz.utc.localize(ts)
+    except Exception:
+        pass
+
+    return ts
 
 
 def to_central(ts):
@@ -139,22 +132,25 @@ def to_central(ts):
     try:
         utc = pytz.utc
         central = pytz.timezone("US/Central")
-        if ts.tzinfo is None:
-            ts = utc.localize(ts)
-        ct_time = ts.astimezone(central)
-        return ct_time.strftime("%b %d, %Y %I:%M:%S %p CT")
+        if isinstance(ts, str):
+            ts = _parse_iso_time(ts)
+        ts = _as_dt(ts) or ts
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = utc.localize(ts)
+            ct_time = ts.astimezone(central)
+            return ct_time.strftime("%b %d, %Y %I:%M:%S %p CT")
+        return str(ts)
     except Exception:
         return str(ts)
 
 
 def fmt_ct_any(ts):
-    """Accepts datetime OR ISO string."""
-    if ts is None:
-        return None
-    if isinstance(ts, str):
-        dt = _parse_iso_time(ts)
-        return to_central(dt) if dt else ts
-    return to_central(ts)
+    """Accepts datetime OR ISO string OR Timestamp-like."""
+    dt = _as_dt(ts)
+    if dt:
+        return to_central(dt)
+    return str(ts) if ts is not None else None
 
 
 def money(x):
@@ -171,13 +167,26 @@ def money0(x):
         return str(x)
 
 
+def _load_push_state():
+    try:
+        with open(_PUSH_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_push_state(state: dict):
+    try:
+        with open(_PUSH_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+
 def _get_fill_time(act):
-    # Use transaction_time if available; fall back to time/timestamp
-    ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-    if isinstance(ts, str):
-        dt = _parse_iso_time(ts)
-        return dt or datetime.min
-    return ts or datetime.min
+    raw = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+    dt = _as_dt(raw)
+    return dt or datetime.min.replace(tzinfo=pytz.utc)
 
 
 def _fill_unique_id(act):
@@ -190,6 +199,7 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
 
     state = _load_push_state()
     initialized = state.get("initialized", False)
+
     last_seen_id = state.get("last_seen_id")
     last_seen_time = state.get("last_seen_time")  # ISO string
 
@@ -223,6 +233,8 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
                     state["last_seen_time"] = newest_time.isoformat()
                     _save_push_state(state)
 
+                    print("Fill watcher initialized (no startup spam).")
+
                     WATCHER_STATUS["initialized"] = True
                     WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
                     WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
@@ -231,11 +243,11 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
                     last_seen_id = state.get("last_seen_id")
                     last_seen_time = state.get("last_seen_time")
 
-                    print("Fill watcher initialized (no startup spam).")
                     time.sleep(poll_seconds)
                     continue
 
-                last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
+                # Determine "new" fills since last_seen_time
+                last_dt = _as_dt(last_seen_time)
 
                 new_items = []
                 for a in fills:
@@ -258,18 +270,9 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
                     price = _get_attr(a, "price")
                     atime = _get_fill_time(a)
 
-                    # Seen time = when our watcher noticed it (CT)
-                    seen_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
-                    fill_ct = to_central(atime)
-
                     side_upper = str(side).upper()
                     title = f"TSLA {side_upper} FILL"
-                    msg = (
-                        f"Qty: {qty} @ ${money(price)}\n"
-                        f"Fill: {fill_ct}\n"
-                        f"Seen: {seen_ct}"
-                    )
-
+                    msg = f"Qty: {qty} @ ${money(price)}\nTime: {to_central(atime)}"
                     send_push(title, msg)
 
                     # advance state after each sent
@@ -277,9 +280,11 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
                     state["last_seen_time"] = atime.isoformat()
                     _save_push_state(state)
 
+                    # update watcher status
                     WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
                     WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
 
+                # keep local copies updated too
                 last_seen_id = state.get("last_seen_id")
                 last_seen_time = state.get("last_seen_time")
 
@@ -313,8 +318,80 @@ def start_fill_watcher():
 
 
 # -------------------------
-# Aggregation helpers
+# Aggregation + Cycles
 # -------------------------
+def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy"):
+    """
+    Turn Alpaca FILL activities into one row per order_id.
+    Returns rows newest-first.
+    """
+    grouped = {}
+
+    for act in activities:
+        symbol = _get_attr(act, "symbol")
+        side = _get_attr(act, "side")
+        if only_symbol and symbol != only_symbol:
+            continue
+        if only_side and side != only_side:
+            continue
+
+        oid = _get_attr(act, "order_id")
+        qty = float(_get_attr(act, "qty", 0) or 0)
+        price = float(_get_attr(act, "price", 0) or 0)
+
+        raw_ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+        ts = _as_dt(raw_ts)
+
+        if oid is None:
+            oid = f"noid:{symbol}:{side}:{raw_ts}:{price}:{qty}"
+
+        g = grouped.setdefault(
+            oid,
+            {
+                "order_id": oid,
+                "time_dt": ts,
+                "side": side,
+                "symbol": symbol,
+                "filled_qty": 0.0,
+                "pv": 0.0,
+            },
+        )
+
+        g["filled_qty"] += qty
+        g["pv"] += qty * price
+
+        # keep earliest time if comparable
+        if ts and g["time_dt"] and ts < g["time_dt"]:
+            g["time_dt"] = ts
+        elif ts and g["time_dt"] is None:
+            g["time_dt"] = ts
+
+    rows = []
+    for _, g in grouped.items():
+        if g["filled_qty"] <= 0:
+            continue
+        vwap = g["pv"] / g["filled_qty"]
+        tdt = g.get("time_dt")
+        rows.append(
+            {
+                "time": tdt.isoformat() if isinstance(tdt, datetime) else "",
+                "symbol": g["symbol"],
+                "side": g["side"],
+                "filled_qty": int(round(g["filled_qty"])),
+                "vwap": round(float(vwap), 4),
+                "total_dollars": round(float(g["pv"]), 2),
+                "order_id": g["order_id"],
+            }
+        )
+
+    def _t_key(r):
+        dt = _as_dt(r.get("time"))
+        return dt or datetime.min.replace(tzinfo=pytz.utc)
+
+    rows.sort(key=_t_key, reverse=True)  # newest-first
+    return rows
+
+
 def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
     """
     Aggregates both buys and sells, one row per order_id.
@@ -328,37 +405,46 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
             continue
 
         side = _get_attr(act, "side")
-        if side not in ("buy", "sell"):
-            continue
-
         oid = _get_attr(act, "order_id")
         qty = float(_get_attr(act, "qty", 0) or 0)
         price = float(_get_attr(act, "price", 0) or 0)
-        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+
+        raw_ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+        ts = _as_dt(raw_ts)
 
         if oid is None:
-            oid = f"noid:{symbol}:{side}:{ts}:{price}:{qty}"
+            oid = f"noid:{symbol}:{side}:{raw_ts}:{price}:{qty}"
 
         g = grouped.setdefault(
             oid,
-            {"order_id": oid, "time": ts, "side": side, "symbol": symbol, "filled_qty": 0.0, "pv": 0.0},
+            {
+                "order_id": oid,
+                "time_dt": ts,
+                "side": side,
+                "symbol": symbol,
+                "filled_qty": 0.0,
+                "pv": 0.0,
+            },
         )
 
         g["filled_qty"] += qty
         g["pv"] += qty * price
 
-        # keep earliest time (best effort)
-        if ts and g["time"] and ts < g["time"]:
-            g["time"] = ts
+        # keep earliest time
+        if ts and g["time_dt"] and ts < g["time_dt"]:
+            g["time_dt"] = ts
+        elif ts and g["time_dt"] is None:
+            g["time_dt"] = ts
 
     rows = []
     for _, g in grouped.items():
         if g["filled_qty"] <= 0:
             continue
         vwap = g["pv"] / g["filled_qty"]
+        tdt = g.get("time_dt")
         rows.append(
             {
-                "time": g["time"].isoformat() if hasattr(g["time"], "isoformat") else str(g["time"]),
+                "time": tdt.isoformat() if isinstance(tdt, datetime) else "",
                 "symbol": g["symbol"],
                 "side": g["side"],
                 "filled_qty": int(round(g["filled_qty"])),
@@ -368,109 +454,36 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
             }
         )
 
-    rows.sort(key=lambda r: r["time"], reverse=True)  # newest-first
+    def _t_key(r):
+        dt = _as_dt(r.get("time"))
+        return dt or datetime.min.replace(tzinfo=pytz.utc)
+
+    rows.sort(key=_t_key, reverse=True)  # newest-first
     return rows
 
 
-def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy"):
+def build_trade_cycles_from_order_rows(order_rows):
     """
-    One row per order_id (filtered to side), returns newest-first.
-    """
-    rows_all = aggregate_fills_all_sides_by_order_id(activities, only_symbol=only_symbol)
-    out = []
-    for r in rows_all:
-        if only_side and r.get("side") != only_side:
-            continue
-        out.append(r)
-    out.sort(key=lambda r: r["time"], reverse=True)
-    return out
-
-
-def _dt_from_any(t):
-    if isinstance(t, datetime):
-        return t
-    if isinstance(t, str):
-        return _parse_iso_time(t) or datetime.min
-    return datetime.min
-
-
-def find_last_flat_time_from_fills(order_rows):
-    """
-    Determine the most recent timestamp when net shares returned to 0.
-    Uses order_rows (one row per order_id) oldest->newest.
-    """
-    ordered = list(reversed(order_rows))  # oldest-first
-    net = 0
-    last_flat_time = None
-    was_positive = False
-
-    for r in ordered:
-        side = r.get("side")
-        qty = int(r.get("filled_qty") or 0)
-        t = r.get("time")
-
-        if side == "buy":
-            net += qty
-            if net > 0:
-                was_positive = True
-        elif side == "sell":
-            net -= qty
-            if net < 0:
-                # can happen if you had earlier position outside our lookback; clamp
-                net = 0
-
-        if was_positive and net == 0:
-            last_flat_time = t
-            was_positive = False  # next cycle begins on next buy
-
-    return last_flat_time
-
-
-def build_closed_cycles_net_flat(order_rows):
-    """
-    Closed cycle = net shares go from 0 -> >0 -> back to 0.
-    Partial sells DO NOT close a cycle.
+    Build closed trade cycles:
+    multiple BUY orders -> one SELL order closes the group.
+    Output: cycles newest-first.
     """
     ordered = list(reversed(order_rows))  # oldest-first
     cycles = []
+    cur = None
 
-    net = 0
-    cost_basis = 0.0  # dollars for currently held shares (approx via buys-sells at vwap)
-    buy_orders = 0
-    shares_bought_total = 0
-
-    anchor_time = None
-    anchor_order_id = None
-    anchor_vwap = None
-
-    last_buy_time = None
-
-    def close_cycle(sell_time, sell_vwap, proceeds_total, total_cost):
-        realized_pl = proceeds_total - total_cost
-        realized_pl_pct = (realized_pl / total_cost * 100.0) if total_cost else None
-        cycles.append(
-            {
-                "anchor_time": fmt_ct_any(anchor_time),
-                "anchor_time_raw": anchor_time,
-                "anchor_order_id": anchor_order_id,
-                "anchor_vwap": round(float(anchor_vwap or 0), 4),
-                "shares": shares_bought_total,
-                "buy_orders": buy_orders,
-                "avg_entry": round((total_cost / shares_bought_total), 4) if shares_bought_total else None,
-                "sell_time": fmt_ct_any(sell_time),
-                "sell_time_raw": sell_time,
-                "sell_order_id": None,
-                "avg_exit": round(float(sell_vwap or 0), 4) if sell_vwap is not None else None,
-                "proceeds": round(float(proceeds_total), 2),
-                "cost": round(float(total_cost), 2),
-                "realized_pl": round(float(realized_pl), 2),
-                "realized_pl_pct": round(float(realized_pl_pct), 3) if realized_pl_pct is not None else None,
-            }
-        )
-
-    cycle_cost_total = 0.0
-    cycle_proceeds_total = 0.0
-    last_sell_vwap = None
+    def start_cycle(buy_row):
+        t = buy_row.get("time")
+        return {
+            "anchor_time_raw": t,
+            "anchor_time": fmt_ct_any(t),
+            "anchor_order_id": buy_row.get("order_id"),
+            "anchor_vwap": float(buy_row.get("vwap") or 0),
+            "buy_orders": 0,
+            "shares": 0,
+            "cost": 0.0,
+            "last_buy_time_raw": t,
+        }
 
     for r in ordered:
         side = r.get("side")
@@ -480,40 +493,50 @@ def build_closed_cycles_net_flat(order_rows):
         t = r.get("time")
 
         if side == "buy":
-            if net == 0:
-                # start cycle
-                anchor_time = t
-                anchor_order_id = r.get("order_id")
-                anchor_vwap = vwap
-                buy_orders = 0
-                shares_bought_total = 0
-                cycle_cost_total = 0.0
-                cycle_proceeds_total = 0.0
-                last_sell_vwap = None
-
-            net += qty
-            buy_orders += 1
-            shares_bought_total += qty
-            cycle_cost_total += dollars
-            last_buy_time = t
+            if cur is None:
+                cur = start_cycle(r)
+            cur["buy_orders"] += 1
+            cur["shares"] += qty
+            cur["cost"] += dollars
+            cur["last_buy_time_raw"] = t
 
         elif side == "sell":
-            if net <= 0:
+            if cur is None or cur["shares"] <= 0:
                 continue
 
-            net -= qty
-            if net < 0:
-                net = 0
+            proceeds = dollars
+            avg_entry = (cur["cost"] / cur["shares"]) if cur["shares"] else None
+            avg_exit = vwap
+            realized_pl = proceeds - cur["cost"]
+            realized_pl_pct = (realized_pl / cur["cost"] * 100.0) if cur["cost"] else None
 
-            cycle_proceeds_total += dollars
-            last_sell_vwap = vwap
+            cycles.append(
+                {
+                    "anchor_time": cur["anchor_time"],
+                    "anchor_time_raw": cur["anchor_time_raw"],
+                    "anchor_order_id": cur["anchor_order_id"],
+                    "anchor_vwap": round(cur["anchor_vwap"], 4),
+                    "shares": cur["shares"],
+                    "buy_orders": cur["buy_orders"],
+                    "avg_entry": round(avg_entry, 4) if avg_entry is not None else None,
+                    "sell_time": fmt_ct_any(t),
+                    "sell_time_raw": t,
+                    "sell_order_id": r.get("order_id"),
+                    "avg_exit": round(avg_exit, 4) if avg_exit is not None else None,
+                    "proceeds": round(proceeds, 2),
+                    "cost": round(cur["cost"], 2),
+                    "realized_pl": round(realized_pl, 2),
+                    "realized_pl_pct": round(realized_pl_pct, 3) if realized_pl_pct is not None else None,
+                }
+            )
 
-            if net == 0:
-                close_cycle(t, last_sell_vwap, cycle_proceeds_total, cycle_cost_total)
-                # reset will happen naturally on next buy
+            cur = None
 
-    # newest-first by sell time
-    cycles.sort(key=lambda c: _dt_from_any(c.get("sell_time_raw")), reverse=True)
+    def _sell_sort_key(c):
+        dt = _as_dt(c.get("sell_time_raw"))
+        return dt or datetime.min.replace(tzinfo=pytz.utc)
+
+    cycles.sort(key=_sell_sort_key, reverse=True)  # newest-first
     return cycles
 
 
@@ -521,7 +544,21 @@ def compute_cycles(days=30, symbol="TSLA"):
     after = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
     acts = api.get_activities(activity_types="FILL", after=after)
     orders = aggregate_fills_all_sides_by_order_id(acts, only_symbol=symbol)
-    return build_closed_cycles_net_flat(orders)
+    return build_trade_cycles_from_order_rows(orders)
+
+
+def find_last_tsla_sell_time(activities):
+    """Return datetime (UTC, tz-aware) of most recent TSLA sell fill, else None."""
+    last = None
+    for act in activities:
+        symbol = _get_attr(act, "symbol")
+        side = _get_attr(act, "side")
+        raw = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+        ts = _as_dt(raw)
+        if symbol == "TSLA" and side == "sell" and ts:
+            if last is None or ts > last:
+                last = ts
+    return last
 
 
 def get_tsla_price_fallback():
@@ -596,7 +633,7 @@ def watcher_debug():
         except Exception:
             last_seen_time = None
 
-        last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
+        last_dt = _as_dt(last_seen_time)
 
         top = []
         new_candidates = []
@@ -628,44 +665,6 @@ def watcher_debug():
                 "would_count_as_new_right_now": new_candidates,
             }
         )
-
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-# ---------
-# SECURE TEST TRADE ENDPOINTS (POST)
-# ---------
-@app.route("/trade_test/buy", methods=["POST"])
-def trade_test_buy():
-    ok, msg = _require_trade_auth()
-    if not ok:
-        return jsonify({"ok": False, "error": msg}), 403
-
-    qty = int(request.args.get("qty", "1"))
-    if qty <= 0:
-        return jsonify({"ok": False, "error": "qty must be > 0"}), 400
-
-    try:
-        o = api.submit_order(symbol="TSLA", qty=qty, side="buy", type="market", time_in_force="day")
-        return jsonify({"ok": True, "submitted": {"side": "buy", "qty": qty, "order_id": _get_attr(o, "id")}})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/trade_test/sell", methods=["POST"])
-def trade_test_sell():
-    ok, msg = _require_trade_auth()
-    if not ok:
-        return jsonify({"ok": False, "error": msg}), 403
-
-    qty = int(request.args.get("qty", "1"))
-    if qty <= 0:
-        return jsonify({"ok": False, "error": "qty must be > 0"}), 400
-
-    try:
-        o = api.submit_order(symbol="TSLA", qty=qty, side="sell", type="market", time_in_force="day")
-        return jsonify({"ok": True, "submitted": {"side": "sell", "qty": qty, "order_id": _get_attr(o, "id")}})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -715,24 +714,24 @@ def report():
             "position": position_data,
         }
 
-        # --- Active Group (full-exit aware) ---
+        # --- Active Group (computed from activities; one-group mode) ---
         try:
             after2 = (datetime.utcnow() - timedelta(days=10)).isoformat() + "Z"
             acts2 = api.get_activities(activity_types="FILL", after=after2)
 
-            # Build order rows (both sides), then compute last FLAT time (net shares hit 0)
-            order_rows_all = aggregate_fills_all_sides_by_order_id(acts2, only_symbol="TSLA")
-            last_flat_time = find_last_flat_time_from_fills(order_rows_all)
+            last_sell_ts = find_last_tsla_sell_time(acts2)  # datetime or None
 
-            # Group buys AFTER last_flat_time (not after last sell)
+            # filter to TSLA buys AFTER last sell
             tsla_buys_after = []
             for act in acts2:
                 symbol = _get_attr(act, "symbol")
                 side = _get_attr(act, "side")
-                ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+                raw_ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+                ts = _as_dt(raw_ts)
+
                 if symbol != "TSLA" or side != "buy" or not ts:
                     continue
-                if last_flat_time and ts <= last_flat_time:
+                if last_sell_ts and ts <= last_sell_ts:
                     continue
                 tsla_buys_after.append(act)
 
@@ -743,12 +742,12 @@ def report():
             active_group_triggers = []
 
             if group_buys:
-                # Anchor lock: FIRST buy trigger after last flat (oldest by time)
-                def _row_time(r):
-                    t = r.get("time")
-                    return _dt_from_any(t) or datetime.max
+                # Anchor lock: FIRST buy trigger after last sell (oldest by time)
+                def _row_time_dt(r):
+                    dt = _as_dt(r.get("time"))
+                    return dt or datetime.max.replace(tzinfo=pytz.utc)
 
-                anchor_row = min(group_buys, key=_row_time)
+                anchor_row = min(group_buys, key=_row_time_dt)
                 anchor_price = float(anchor_row["vwap"])
                 group_start_time = anchor_row.get("time")
 
@@ -760,6 +759,7 @@ def report():
                 buys_count = len(group_buys)
                 stage = (buys_count - 1) // FIRST_INCREMENT_COUNT + 1
                 drop_increment = float(stage)
+
                 buys_in_this_stage = (buys_count - 1) % FIRST_INCREMENT_COUNT + 1
 
                 # compute next buy price
@@ -798,10 +798,9 @@ def report():
                     "distance_to_next_buy": distance_to_next_buy,
                     "anchor_time": fmt_ct_any(anchor_row.get("time")),
                     "anchor_order_id": anchor_row.get("order_id"),
-                    "last_flat_time": fmt_ct_any(last_flat_time) if last_flat_time else None,
                 }
 
-                # chronological (oldest-first) so actual_drop is correct.
+                # Build chronological first (oldest-first) so actual_drop is correct.
                 ladder_oldest_first = list(reversed(group_buys))  # oldest-first
                 prev_vwap = None
                 tmp_rows = []
@@ -824,11 +823,12 @@ def report():
                     )
                     prev_vwap = vwap
 
-                active_group_triggers = list(reversed(tmp_rows))  # newest-first display
+                # Display newest-first (most recent fill first)
+                active_group_triggers = list(reversed(tmp_rows))
 
             data["active_group"] = active_group
             data["active_group_triggers"] = active_group_triggers
-            data["active_group_last_flat_time"] = (last_flat_time.isoformat() if hasattr(last_flat_time, "isoformat") else str(last_flat_time) if last_flat_time else None)
+            data["active_group_last_sell_time"] = (last_sell_ts.isoformat() if last_sell_ts else None)
 
         except Exception as e:
             data["active_group_error"] = str(e)
@@ -843,7 +843,7 @@ def report():
 
 @app.route("/cycles")
 def cycles():
-    """Closed trade cycles newest-first (only closes when net shares returns to 0)."""
+    """Closed trade cycles newest-first."""
     try:
         cyc = compute_cycles(days=30, symbol="TSLA")
         return jsonify({"ok": True, "cycles": cyc})
@@ -882,6 +882,7 @@ def table_view():
     <style>
       body { font-family: Arial, sans-serif; padding: 16px; }
       .box { padding: 12px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; background: #fff; }
+      .row { margin: 4px 0; }
       .muted { color: #666; }
 
       table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
@@ -890,17 +891,20 @@ def table_view():
       td:first-child, th:first-child { text-align: center; }
       td:nth-child(2), th:nth-child(2) { text-align: left; }
 
+      /* BIG live TSLA price banner */
       .price-wrap { display: flex; justify-content: center; margin-bottom: 12px; }
       .price-box { max-width: 520px; width: 100%; text-align: center; }
       .price-label { font-size: 16px; color: #666; margin-bottom: 4px; }
       .price-banner { font-size: 42px; font-weight: bold; margin-bottom: 4px; }
 
+      /* Small metric box (Potential Profit) */
       .metric-wrap { display: flex; justify-content: center; margin: 0 0 16px; }
       .metric-box { max-width: 520px; width: 100%; text-align: center; }
       .metric-title { font-size: 16px; color: #666; margin-bottom: 6px; }
       .metric-value { font-size: 28px; font-weight: bold; margin-bottom: 4px; }
       .metric-sub { font-size: 14px; color: #666; }
 
+      /* Top row: Account (left) + Summary (right), centered as a pair */
       .top-row {
         display: flex;
         justify-content: center;
@@ -910,6 +914,7 @@ def table_view():
         flex-wrap: wrap;
       }
 
+      /* Two-column rows (shared) */
       .grid-row {
         display: grid;
         grid-template-columns: 1fr auto;
@@ -919,9 +924,11 @@ def table_view():
       .grid-label { text-align: left; }
       .grid-value { text-align: right; font-variant-numeric: tabular-nums; }
 
+      /* Account + Summary widths */
       .acct-grid { max-width: 400px; margin: 0; width: 100%; }
       .summary-grid { max-width: 400px; margin: 0; width: 100%; }
 
+      /* Small section heading inside boxes */
       .box-title { font-weight: bold; margin-bottom: 2px; }
       .box-sub { color: #666; font-size: 13px; margin-bottom: 8px; }
       .section-gap { margin-top: 10px; }
