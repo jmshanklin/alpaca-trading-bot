@@ -66,107 +66,6 @@ WATCHER_STATUS = {
 }
 
 
-# -------------------------
-# Helpers
-# -------------------------
-def _get_attr(obj, name, default=None):
-    """Works whether Alpaca returns an object or dict-like."""
-    try:
-        return getattr(obj, name)
-    except Exception:
-        pass
-    try:
-        return obj.get(name, default)
-    except Exception:
-        return default
-
-
-def _parse_iso_time(s):
-    """Parse ISO timestamps; returns timezone-aware datetime when possible."""
-    try:
-        # Handles "...Z" and "+00:00"
-        return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-def _as_dt(ts):
-    """
-    Normalize Alpaca time values to a timezone-aware datetime.
-    Handles:
-      - datetime
-      - ISO string
-      - pandas Timestamp-like objects (has .to_pydatetime())
-    """
-    if ts is None:
-        return None
-
-    # pandas Timestamp or similar
-    try:
-        if hasattr(ts, "to_pydatetime"):
-            ts = ts.to_pydatetime()
-    except Exception:
-        pass
-
-    # ISO string
-    if isinstance(ts, str):
-        ts = _parse_iso_time(ts)
-
-    if not isinstance(ts, datetime):
-        return None
-
-    # Ensure tz-aware (assume UTC if missing)
-    try:
-        if ts.tzinfo is None:
-            ts = pytz.utc.localize(ts)
-    except Exception:
-        pass
-
-    return ts
-
-
-def to_central(ts):
-    """UTC -> Central Time formatted string."""
-    if not ts:
-        return None
-    try:
-        utc = pytz.utc
-        central = pytz.timezone("US/Central")
-        if isinstance(ts, str):
-            ts = _parse_iso_time(ts)
-        ts = _as_dt(ts) or ts
-        if isinstance(ts, datetime):
-            if ts.tzinfo is None:
-                ts = utc.localize(ts)
-            ct_time = ts.astimezone(central)
-            return ct_time.strftime("%b %d, %Y %I:%M:%S %p CT")
-        return str(ts)
-    except Exception:
-        return str(ts)
-
-
-def fmt_ct_any(ts):
-    """Accepts datetime OR ISO string OR Timestamp-like."""
-    dt = _as_dt(ts)
-    if dt:
-        return to_central(dt)
-    return str(ts) if ts is not None else None
-
-
-def money(x):
-    try:
-        return f"{float(x):,.2f}"
-    except Exception:
-        return str(x)
-
-
-def money0(x):
-    try:
-        return f"{float(x):,.0f}"
-    except Exception:
-        return str(x)
-
-
 def _load_push_state():
     try:
         with open(_PUSH_STATE_PATH, "r", encoding="utf-8") as f:
@@ -184,9 +83,9 @@ def _save_push_state(state: dict):
 
 
 def _get_fill_time(act):
-    raw = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-    dt = _as_dt(raw)
-    return dt or datetime.min.replace(tzinfo=pytz.utc)
+    ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+    ts = _normalize_ts(ts)
+    return ts or datetime.min
 
 
 def _fill_unique_id(act):
@@ -247,7 +146,7 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
                     continue
 
                 # Determine "new" fills since last_seen_time
-                last_dt = _as_dt(last_seen_time)
+                last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
 
                 new_items = []
                 for a in fills:
@@ -318,6 +217,149 @@ def start_fill_watcher():
 
 
 # -------------------------
+# Helpers
+# -------------------------
+def _get_attr(obj, name, default=None):
+    """Works whether Alpaca returns an object or dict-like."""
+    try:
+        return getattr(obj, name)
+    except Exception:
+        pass
+    try:
+        return obj.get(name, default)
+    except Exception:
+        return default
+
+
+def _parse_iso_time(s):
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _normalize_ts(ts):
+    """
+    Normalize Alpaca timestamps so comparisons never crash.
+    - strings -> datetime
+    - pandas Timestamp -> python datetime
+    - datetime passes through
+    """
+    if ts is None:
+        return None
+    if isinstance(ts, str):
+        return _parse_iso_time(ts) or None
+    # pandas Timestamp has to_pydatetime()
+    if hasattr(ts, "to_pydatetime"):
+        try:
+            return ts.to_pydatetime()
+        except Exception:
+            return ts
+    return ts
+
+
+def to_central(ts):
+    """UTC -> Central Time formatted string."""
+    if not ts:
+        return None
+    try:
+        utc = pytz.utc
+        central = pytz.timezone("US/Central")
+        if ts.tzinfo is None:
+            ts = utc.localize(ts)
+        ct_time = ts.astimezone(central)
+        return ct_time.strftime("%b %d, %Y %I:%M:%S %p CT")
+    except Exception:
+        return str(ts)
+
+
+def fmt_ct_any(ts):
+    """Accepts datetime OR ISO string."""
+    if ts is None:
+        return None
+    if isinstance(ts, str):
+        dt = _parse_iso_time(ts)
+        return to_central(dt) if dt else ts
+    return to_central(ts)
+
+
+def money(x):
+    try:
+        return f"{float(x):,.2f}"
+    except Exception:
+        return str(x)
+
+
+def money0(x):
+    try:
+        return f"{float(x):,.0f}"
+    except Exception:
+        return str(x)
+
+
+# -------------------------
+# Bot sell detection (so manual sells don't reset Active Group)
+# -------------------------
+# Your bot uses: client_order_id = f"grid-sell-{cfg.symbol}-..."
+# For TSLA that becomes: "grid-sell-TSLA-..."
+BOT_SELL_CLIENT_PREFIXES = [
+    p.strip()
+    for p in (os.getenv("BOT_SELL_CLIENT_PREFIXES", "grid-sell-TSLA-") or "").split(",")
+    if p.strip()
+]
+
+# Small in-memory cache to reduce repeated order lookups
+_ORDER_CLIENT_ID_CACHE = {}  # order_id -> client_order_id (or None)
+_ORDER_CLIENT_ID_CACHE_MAX = 500
+
+
+def _get_client_order_id_for_order(order_id: str):
+    if not order_id:
+        return None
+
+    if order_id in _ORDER_CLIENT_ID_CACHE:
+        return _ORDER_CLIENT_ID_CACHE.get(order_id)
+
+    try:
+        o = api.get_order(order_id)
+        cid = _get_attr(o, "client_order_id")
+    except Exception:
+        cid = None
+
+    # simple bounded cache
+    if len(_ORDER_CLIENT_ID_CACHE) >= _ORDER_CLIENT_ID_CACHE_MAX:
+        try:
+            _ORDER_CLIENT_ID_CACHE.pop(next(iter(_ORDER_CLIENT_ID_CACHE)))
+        except Exception:
+            _ORDER_CLIENT_ID_CACHE.clear()
+
+    _ORDER_CLIENT_ID_CACHE[order_id] = cid
+    return cid
+
+
+def _is_bot_sell_fill(act):
+    """
+    True only when this SELL fill belongs to the bot's SELL-ALL order,
+    identified by client_order_id prefix.
+    """
+    try:
+        if _get_attr(act, "symbol") != "TSLA":
+            return False
+        if _get_attr(act, "side") != "sell":
+            return False
+        order_id = _get_attr(act, "order_id")
+        cid = _get_client_order_id_for_order(str(order_id)) if order_id else None
+        if not cid:
+            return False
+        for pfx in BOT_SELL_CLIENT_PREFIXES:
+            if cid.startswith(pfx):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+# -------------------------
 # Aggregation + Cycles
 # -------------------------
 def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy"):
@@ -339,42 +381,33 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
         qty = float(_get_attr(act, "qty", 0) or 0)
         price = float(_get_attr(act, "price", 0) or 0)
 
-        raw_ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-        ts = _as_dt(raw_ts)
+        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+        ts = _normalize_ts(ts)
 
         if oid is None:
-            oid = f"noid:{symbol}:{side}:{raw_ts}:{price}:{qty}"
+            oid = f"noid:{symbol}:{side}:{ts}:{price}:{qty}"
 
         g = grouped.setdefault(
             oid,
-            {
-                "order_id": oid,
-                "time_dt": ts,
-                "side": side,
-                "symbol": symbol,
-                "filled_qty": 0.0,
-                "pv": 0.0,
-            },
+            {"order_id": oid, "time": ts, "side": side, "symbol": symbol, "filled_qty": 0.0, "pv": 0.0},
         )
 
         g["filled_qty"] += qty
         g["pv"] += qty * price
 
         # keep earliest time if comparable
-        if ts and g["time_dt"] and ts < g["time_dt"]:
-            g["time_dt"] = ts
-        elif ts and g["time_dt"] is None:
-            g["time_dt"] = ts
+        if ts and g["time"] and ts < g["time"]:
+            g["time"] = ts
 
     rows = []
     for _, g in grouped.items():
         if g["filled_qty"] <= 0:
             continue
         vwap = g["pv"] / g["filled_qty"]
-        tdt = g.get("time_dt")
+        t = g["time"]
         rows.append(
             {
-                "time": tdt.isoformat() if isinstance(tdt, datetime) else "",
+                "time": t.isoformat() if hasattr(t, "isoformat") else str(t),
                 "symbol": g["symbol"],
                 "side": g["side"],
                 "filled_qty": int(round(g["filled_qty"])),
@@ -384,11 +417,7 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
             }
         )
 
-    def _t_key(r):
-        dt = _as_dt(r.get("time"))
-        return dt or datetime.min.replace(tzinfo=pytz.utc)
-
-    rows.sort(key=_t_key, reverse=True)  # newest-first
+    rows.sort(key=lambda r: r["time"], reverse=True)  # newest-first
     return rows
 
 
@@ -409,42 +438,33 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
         qty = float(_get_attr(act, "qty", 0) or 0)
         price = float(_get_attr(act, "price", 0) or 0)
 
-        raw_ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-        ts = _as_dt(raw_ts)
+        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+        ts = _normalize_ts(ts)
 
         if oid is None:
-            oid = f"noid:{symbol}:{side}:{raw_ts}:{price}:{qty}"
+            oid = f"noid:{symbol}:{side}:{ts}:{price}:{qty}"
 
         g = grouped.setdefault(
             oid,
-            {
-                "order_id": oid,
-                "time_dt": ts,
-                "side": side,
-                "symbol": symbol,
-                "filled_qty": 0.0,
-                "pv": 0.0,
-            },
+            {"order_id": oid, "time": ts, "side": side, "symbol": symbol, "filled_qty": 0.0, "pv": 0.0},
         )
 
         g["filled_qty"] += qty
         g["pv"] += qty * price
 
         # keep earliest time
-        if ts and g["time_dt"] and ts < g["time_dt"]:
-            g["time_dt"] = ts
-        elif ts and g["time_dt"] is None:
-            g["time_dt"] = ts
+        if ts and g["time"] and ts < g["time"]:
+            g["time"] = ts
 
     rows = []
     for _, g in grouped.items():
         if g["filled_qty"] <= 0:
             continue
         vwap = g["pv"] / g["filled_qty"]
-        tdt = g.get("time_dt")
+        t = g["time"]
         rows.append(
             {
-                "time": tdt.isoformat() if isinstance(tdt, datetime) else "",
+                "time": t.isoformat() if hasattr(t, "isoformat") else str(t),
                 "symbol": g["symbol"],
                 "side": g["side"],
                 "filled_qty": int(round(g["filled_qty"])),
@@ -454,11 +474,7 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
             }
         )
 
-    def _t_key(r):
-        dt = _as_dt(r.get("time"))
-        return dt or datetime.min.replace(tzinfo=pytz.utc)
-
-    rows.sort(key=_t_key, reverse=True)  # newest-first
+    rows.sort(key=lambda r: r["time"], reverse=True)  # newest-first
     return rows
 
 
@@ -533,8 +549,11 @@ def build_trade_cycles_from_order_rows(order_rows):
             cur = None
 
     def _sell_sort_key(c):
-        dt = _as_dt(c.get("sell_time_raw"))
-        return dt or datetime.min.replace(tzinfo=pytz.utc)
+        raw = c.get("sell_time_raw")
+        if isinstance(raw, str):
+            dt = _parse_iso_time(raw)
+            return dt or datetime.min
+        return raw or datetime.min
 
     cycles.sort(key=_sell_sort_key, reverse=True)  # newest-first
     return cycles
@@ -547,15 +566,18 @@ def compute_cycles(days=30, symbol="TSLA"):
     return build_trade_cycles_from_order_rows(orders)
 
 
-def find_last_tsla_sell_time(activities):
-    """Return datetime (UTC, tz-aware) of most recent TSLA sell fill, else None."""
+def find_last_tsla_bot_sell_time(activities):
+    """
+    Return timestamp of most recent TSLA SELL fill that belongs to the BOT's
+    sell-all order (client_order_id prefix match). Manual sells are ignored.
+    """
     last = None
     for act in activities:
-        symbol = _get_attr(act, "symbol")
-        side = _get_attr(act, "side")
-        raw = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-        ts = _as_dt(raw)
-        if symbol == "TSLA" and side == "sell" and ts:
+        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+        ts = _normalize_ts(ts)
+        if not ts:
+            continue
+        if _is_bot_sell_fill(act):
             if last is None or ts > last:
                 last = ts
     return last
@@ -593,19 +615,6 @@ def watcher_status():
     return jsonify({"ok": True, "watcher": WATCHER_STATUS})
 
 
-@app.route("/pushover_status")
-def pushover_status():
-    return jsonify(
-        {
-            "ok": True,
-            "watcher": WATCHER_STATUS,
-            "push_enabled": ENABLE_PUSH_ALERTS,
-            "has_user_key": bool(PUSHOVER_USER_KEY),
-            "has_app_token": bool(PUSHOVER_APP_TOKEN),
-        }
-    )
-
-
 @app.route("/watcher_debug")
 def watcher_debug():
     """
@@ -633,7 +642,7 @@ def watcher_debug():
         except Exception:
             last_seen_time = None
 
-        last_dt = _as_dt(last_seen_time)
+        last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
 
         top = []
         new_candidates = []
@@ -641,6 +650,10 @@ def watcher_debug():
         for a in fills[:15]:
             aid = _fill_unique_id(a)
             atime = _get_fill_time(a)
+
+            order_id = _get_attr(a, "order_id")
+            cid = _get_client_order_id_for_order(str(order_id)) if order_id else None
+
             row = {
                 "id": aid,
                 "time_utc": atime.isoformat() if hasattr(atime, "isoformat") else str(atime),
@@ -648,6 +661,9 @@ def watcher_debug():
                 "side": _get_attr(a, "side"),
                 "qty": _get_attr(a, "qty"),
                 "price": _get_attr(a, "price"),
+                "order_id": str(order_id) if order_id else None,
+                "client_order_id": cid,
+                "is_bot_sell": _is_bot_sell_fill(a),
             }
             top.append(row)
 
@@ -663,8 +679,10 @@ def watcher_debug():
                 "tsla_fill_count_last_2d": len(fills),
                 "top_15_tsla_fills_newest_first": top,
                 "would_count_as_new_right_now": new_candidates,
+                "bot_sell_prefixes": BOT_SELL_CLIENT_PREFIXES,
             }
         )
+
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -714,21 +732,30 @@ def report():
             "position": position_data,
         }
 
+        # If you do NOT currently hold TSLA, then there is no "active group" to show.
+        # This avoids confusing displays after manual full exits.
+        if position_data is None or float(position_data.get("qty", 0) or 0) <= 0:
+            data["active_group"] = None
+            data["active_group_triggers"] = []
+            data["active_group_last_sell_time"] = None
+            return jsonify(data)
+
         # --- Active Group (computed from activities; one-group mode) ---
         try:
             after2 = (datetime.utcnow() - timedelta(days=10)).isoformat() + "Z"
             acts2 = api.get_activities(activity_types="FILL", after=after2)
 
-            last_sell_ts = find_last_tsla_sell_time(acts2)  # datetime or None
+            # IMPORTANT CHANGE:
+            # Only bot SELL-ALL resets the group. Manual sells are ignored here.
+            last_sell_ts = find_last_tsla_bot_sell_time(acts2)
 
-            # filter to TSLA buys AFTER last sell
+            # filter to TSLA buys AFTER last bot sell-all
             tsla_buys_after = []
             for act in acts2:
                 symbol = _get_attr(act, "symbol")
                 side = _get_attr(act, "side")
-                raw_ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-                ts = _as_dt(raw_ts)
-
+                ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+                ts = _normalize_ts(ts)
                 if symbol != "TSLA" or side != "buy" or not ts:
                     continue
                 if last_sell_ts and ts <= last_sell_ts:
@@ -742,12 +769,14 @@ def report():
             active_group_triggers = []
 
             if group_buys:
-                # Anchor lock: FIRST buy trigger after last sell (oldest by time)
-                def _row_time_dt(r):
-                    dt = _as_dt(r.get("time"))
-                    return dt or datetime.max.replace(tzinfo=pytz.utc)
+                # Anchor lock: FIRST buy trigger after last bot sell-all (oldest by time)
+                def _row_time(r):
+                    t = r.get("time")
+                    if isinstance(t, str):
+                        return _parse_iso_time(t) or datetime.max
+                    return t or datetime.max
 
-                anchor_row = min(group_buys, key=_row_time_dt)
+                anchor_row = min(group_buys, key=_row_time)
                 anchor_price = float(anchor_row["vwap"])
                 group_start_time = anchor_row.get("time")
 
@@ -759,7 +788,6 @@ def report():
                 buys_count = len(group_buys)
                 stage = (buys_count - 1) // FIRST_INCREMENT_COUNT + 1
                 drop_increment = float(stage)
-
                 buys_in_this_stage = (buys_count - 1) % FIRST_INCREMENT_COUNT + 1
 
                 # compute next buy price
@@ -798,6 +826,7 @@ def report():
                     "distance_to_next_buy": distance_to_next_buy,
                     "anchor_time": fmt_ct_any(anchor_row.get("time")),
                     "anchor_order_id": anchor_row.get("order_id"),
+                    "buy_qty": BUY_QTY,
                 }
 
                 # Build chronological first (oldest-first) so actual_drop is correct.
@@ -1039,6 +1068,8 @@ def table_view():
     )
     html.append("<tbody id='ladder-body'>")
 
+    buy_qty = ag.get("buy_qty") or 12
+
     # WAITING row at TOP
     if ag and ag.get("next_buy_price") is not None and ag.get("buys_count") is not None:
         next_trigger = int(ag["buys_count"]) + 1
@@ -1047,7 +1078,7 @@ def table_view():
             "<tr>"
             f"<td><b>{next_trigger}</b></td>"
             f"<td><b>WAITING</b></td>"
-            f"<td>12</td>"
+            f"<td>{buy_qty}</td>"
             f"<td>—</td>"
             f"<td><b>{ag.get('next_buy_price')}</b></td>"
             f"<td><b>{intended_drop_next}</b></td>"
@@ -1191,6 +1222,7 @@ def table_view():
           ladderBody.innerHTML = "";
 
           const rows = data.active_group_triggers || [];
+          const buyQty = (ag.buy_qty ?? 12);
 
           if (ag && ag.next_buy_price != null && ag.buys_count != null) {
             const nextTrigger = Number(ag.buys_count) + 1;
@@ -1200,7 +1232,7 @@ def table_view():
             trW.innerHTML = `
               <td><b>${nextTrigger}</b></td>
               <td><b>WAITING</b></td>
-              <td>12</td>
+              <td>${buyQty}</td>
               <td>—</td>
               <td><b>${ag.next_buy_price}</b></td>
               <td><b>${intendedDropNext}</b></td>
@@ -1272,6 +1304,20 @@ def table_view():
 
     html.append("</body></html>")
     return Response("\n".join(html), mimetype="text/html")
+
+
+@app.route("/pushover_status")
+def pushover_status():
+    return jsonify(
+        {
+            "ok": True,
+            "watcher": WATCHER_STATUS,
+            "push_enabled": ENABLE_PUSH_ALERTS,
+            "has_user_key": bool(PUSHOVER_USER_KEY),
+            "has_app_token": bool(PUSHOVER_APP_TOKEN),
+            "bot_sell_prefixes": BOT_SELL_CLIENT_PREFIXES,
+        }
+    )
 
 
 # Start the BUY/SELL push watcher when the app loads
