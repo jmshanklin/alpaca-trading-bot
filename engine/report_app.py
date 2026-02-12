@@ -102,6 +102,9 @@ def _fill_unique_id(act):
 def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
     global WATCHER_STATUS
 
+    try: os.remove(_PUSH_STATE_PATH)
+    except Exception: pass
+
     state = _load_push_state()
     initialized = state.get("initialized", False)
 
