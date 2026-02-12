@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta
-
+import requests
 import alpaca_trade_api as tradeapi
 import pytz
 from flask import Flask, Response, jsonify
@@ -12,6 +12,37 @@ API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 BASE_URL = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
 api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
+
+# -------------------------
+# PUSHOVER ALERTS
+# -------------------------
+ENABLE_PUSH_ALERTS = os.getenv("ENABLE_PUSH_ALERTS", "0") == "1"
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
+PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
+
+def send_push(title: str, message: str):
+    """Send push notification to phone via Pushover."""
+    if not ENABLE_PUSH_ALERTS:
+        return
+
+    if not PUSHOVER_USER_KEY or not PUSHOVER_APP_TOKEN:
+        print("Pushover keys missing")
+        return
+
+    try:
+        requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={
+                "token": PUSHOVER_APP_TOKEN,
+                "user": PUSHOVER_USER_KEY,
+                "title": title,
+                "message": message,
+                "priority": 1
+            },
+            timeout=10
+        )
+    except Exception as e:
+        print("Push send error:", e)
 
 # -------------------------
 # Helpers
@@ -321,6 +352,11 @@ def get_tsla_price_fallback():
 @app.route("/")
 def home():
     return "Alpaca Report Service Running"
+
+@app.route("/push_test")
+def push_test():
+    send_push("TSLA BOT TEST 🚀", "If you see this, push alerts work!")
+    return "Push notification sent"
     
 @app.route("/report")
 def report():
