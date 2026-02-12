@@ -1,12 +1,13 @@
 import os
+import json
+import time
+import threading
 from datetime import datetime, timedelta
+
 import requests
 import alpaca_trade_api as tradeapi
 import pytz
 from flask import Flask, Response, jsonify
-import json
-import time
-import threading
 
 app = Flask(__name__)
 
@@ -22,6 +23,7 @@ api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
 ENABLE_PUSH_ALERTS = os.getenv("ENABLE_PUSH_ALERTS", "0") == "1"
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
+
 
 def send_push(title: str, message: str):
     """Send push notification to phone via Pushover."""
@@ -40,17 +42,32 @@ def send_push(title: str, message: str):
                 "user": PUSHOVER_USER_KEY,
                 "title": title,
                 "message": message,
-                "priority": 1
+                "priority": 1,
             },
-            timeout=10
+            timeout=10,
         )
     except Exception as e:
         print("Push send error:", e)
-        
+
+
+# -------------------------
+# WATCHER STATUS (Step 6)
+# -------------------------
+WATCHER_STATUS = {
+    "started": False,
+    "initialized": False,
+    "last_seen_time": None,
+    "last_seen_id": None,
+    "last_error": None,
+}
+
+_WATCHER_THREAD_STARTED = False  # guard: only start once per process
+
+
 # -------------------------
 # BUY/SELL FILL WATCHER -> PUSH ALERTS
 # -------------------------
-_PUSH_STATE_PATH = "/tmp/pushover_last_fill.json"  # persists during runtime; resets if service restarts
+_PUSH_STATE_PATH = "/tmp/pushover_last_fill.json"  # survives during runtime; resets if service restarts
 
 
 def _load_push_state():
@@ -83,10 +100,13 @@ def _fill_unique_id(act):
 
 
 def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
+    global WATCHER_STATUS
+
     state = _load_push_state()
     initialized = state.get("initialized", False)
+
     last_seen_id = state.get("last_seen_id")
-    last_seen_time = state.get("last_seen_time")  # iso string
+    last_seen_time = state.get("last_seen_time")  # ISO string
 
     while True:
         try:
@@ -117,7 +137,17 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
                     state["last_seen_id"] = newest_id
                     state["last_seen_time"] = newest_time.isoformat()
                     _save_push_state(state)
+
                     print("Fill watcher initialized (no startup spam).")
+
+                    WATCHER_STATUS["initialized"] = True
+                    WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
+                    WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
+
+                    initialized = True
+                    last_seen_id = state.get("last_seen_id")
+                    last_seen_time = state.get("last_seen_time")
+
                     time.sleep(poll_seconds)
                     continue
 
@@ -147,11 +177,7 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
 
                     side_upper = str(side).upper()
                     title = f"TSLA {side_upper} FILL"
-                    msg = (
-                        f"Qty: {qty} @ ${money(price)}\n"
-                        f"Time: {to_central(atime)}"
-                    )
-
+                    msg = f"Qty: {qty} @ ${money(price)}\nTime: {to_central(atime)}"
                     send_push(title, msg)
 
                     # advance state after each sent
@@ -159,15 +185,29 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
                     state["last_seen_time"] = atime.isoformat()
                     _save_push_state(state)
 
+                    # update watcher status
+                    WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
+                    WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
+
+                # keep local copies updated too
+                last_seen_id = state.get("last_seen_id")
+                last_seen_time = state.get("last_seen_time")
+
         except Exception as e:
             print("Fill watcher error:", str(e))
+            WATCHER_STATUS["last_error"] = str(e)
 
         time.sleep(poll_seconds)
 
 
 def start_fill_watcher():
+    global _WATCHER_THREAD_STARTED
+
     if not ENABLE_PUSH_ALERTS:
         print("Push alerts disabled (ENABLE_PUSH_ALERTS != 1).")
+        return
+
+    if _WATCHER_THREAD_STARTED:
         return
 
     t = threading.Thread(
@@ -176,8 +216,12 @@ def start_fill_watcher():
         daemon=True,
     )
     t.start()
+    _WATCHER_THREAD_STARTED = True
+
+    WATCHER_STATUS["started"] = True
     print("Fill watcher started.")
-        
+
+
 # -------------------------
 # Helpers
 # -------------------------
@@ -267,14 +311,7 @@ def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy")
 
         g = grouped.setdefault(
             oid,
-            {
-                "order_id": oid,
-                "time": ts,
-                "side": side,
-                "symbol": symbol,
-                "filled_qty": 0.0,
-                "pv": 0.0,
-            },
+            {"order_id": oid, "time": ts, "side": side, "symbol": symbol, "filled_qty": 0.0, "pv": 0.0},
         )
 
         g["filled_qty"] += qty
@@ -328,14 +365,7 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
 
         g = grouped.setdefault(
             oid,
-            {
-                "order_id": oid,
-                "time": ts,
-                "side": side,
-                "symbol": symbol,
-                "filled_qty": 0.0,
-                "pv": 0.0,
-            },
+            {"order_id": oid, "time": ts, "side": side, "symbol": symbol, "filled_qty": 0.0, "pv": 0.0},
         )
 
         g["filled_qty"] += qty
@@ -487,11 +517,18 @@ def get_tsla_price_fallback():
 def home():
     return "Alpaca Report Service Running"
 
+
 @app.route("/push_test")
 def push_test():
     send_push("TSLA BOT TEST 🚀", "If you see this, push alerts work!")
-    return "Push notification sent"
-    
+    return jsonify({"ok": True, "message": "sent"})
+
+
+@app.route("/watcher_status")
+def watcher_status():
+    return jsonify({"ok": True, "watcher": WATCHER_STATUS})
+
+
 @app.route("/report")
 def report():
     """Report: account + TSLA price + TSLA position + active group + ladder triggers. Always returns JSON."""
@@ -760,35 +797,27 @@ def table_view():
     )
     html.append("</head><body>")
 
-    # -------------------------
     # TSLA price indicator (TOP)
-    # -------------------------
     html.append("<div class='price-wrap'>")
     html.append("<div class='box price-box'>")
     html.append("<div class='price-label'>TSLA Price</div>")
     html.append(
         f"<div class='price-banner'>$<span id='tsla-price'>{money(tsla_price) if tsla_price is not None else ''}</span></div>"
     )
-    html.append("</div>")
-    html.append("</div>")
+    html.append("</div></div>")
 
-    # -------------------------
-    # Potential Profit (to Sell Target) (TOTAL + PER SHARE)
-    # -------------------------
+    # Potential Profit box
     html.append("<div class='metric-wrap'>")
     html.append("<div class='box metric-box'>")
     html.append("<div class='metric-title'>Potential Profit (to Sell Target)</div>")
     html.append("<div class='metric-value'>$<span id='potential-profit'></span></div>")
     html.append("<div class='metric-sub'>Per share: $<span id='potential-per-share'></span></div>")
-    html.append("</div>")
-    html.append("</div>")
+    html.append("</div></div>")
 
-    # -------------------------
-    # Side-by-side boxes: Account (left) + Summary (right)
-    # -------------------------
+    # Side-by-side boxes
     html.append("<div class='top-row'>")
 
-    # Account box (LEFT)
+    # Account box
     html.append("<div class='box acct-grid'>")
     html.append("<div class='box-title'>Account</div>")
     html.append("<div class='box-sub'>Updates every 15 seconds (time-based), independent of trade activity.</div>")
@@ -812,13 +841,12 @@ def table_view():
     html.append(acct_row("Non-Marginable Buying Power", "non_marginable_buying_power", fmt="money0"))
 
     html.append("<div class='section-gap'></div>")
-
     html.append(acct_row("Long Market Value", "long_market_value"))
     html.append(acct_row("Initial Margin", "initial_margin"))
     html.append(acct_row("Maintenance Margin", "maintenance_margin"))
     html.append("</div>")  # end Account box
 
-    # Summary box (RIGHT) - same 2-column layout as Account
+    # Summary box
     html.append("<div class='box summary-grid'>")
     html.append("<div class='box-title'>Summary</div>")
     html.append("<div class='box-sub'>Bot status + ladder metrics (updates every 15 seconds).</div>")
@@ -840,9 +868,7 @@ def table_view():
         )
 
     html.append(sum_row("Last updated", data.get("server_time_ct", ""), "last-updated"))
-
     html.append("<div class='section-gap'></div>")
-
     html.append(sum_row("Anchor", ag.get("anchor_vwap"), "ag-anchor-vwap"))
     html.append(sum_row("Anchor time", ag.get("anchor_time"), "ag-anchor-time"))
     html.append(sum_row("Sell Target", ag.get("sell_target"), "ag-sell-target"))
@@ -861,23 +887,14 @@ def table_view():
         html.append(sum_row("uP/L", money(pos.get("unrealized_pl")), "pos-upl", prefix="$"))
 
     html.append("</div>")  # end Summary box
+    html.append("</div>")  # end top-row
 
-    html.append("</div>")  # end top-row container
-
-    # -------------------------
-    # Ladder table (WAITING row at TOP)
-    # -------------------------
+    # Ladder table
     html.append("<h2>Active Group Ladder</h2>")
     html.append("<table>")
     html.append(
         "<thead><tr>"
-        "<th>#</th>"
-        "<th>Time (CT)</th>"
-        "<th>Shares</th>"
-        "<th>Total $</th>"
-        "<th>Avg Price</th>"
-        "<th>Intended Drop</th>"
-        "<th>Actual Drop</th>"
+        "<th>#</th><th>Time (CT)</th><th>Shares</th><th>Total $</th><th>Avg Price</th><th>Intended Drop</th><th>Actual Drop</th>"
         "</tr></thead>"
     )
     html.append("<tbody id='ladder-body'>")
@@ -914,9 +931,7 @@ def table_view():
 
     html.append("</tbody></table>")
 
-    # -------------------------
     # Cycles table (filled by JS)
-    # -------------------------
     html.append("<h2>Closed Trade Cycles</h2>")
     html.append(
         """
@@ -939,9 +954,7 @@ def table_view():
     """
     )
 
-    # -------------------------
-    # JS: refresh /report + /cycles every 15s (no full-page refresh)
-    # -------------------------
+    # JS: refresh
     html.append(
         """
     <script>
@@ -977,13 +990,9 @@ def table_view():
         const data = await res.json();
         if (!data.ok) return;
 
-        // Big TSLA price (top)
         setText("tsla-price", fmtMoney(data.tsla_price));
-
-        // last updated (server time)
         setText("last-updated", data.server_time_ct);
 
-        // Active group fields
         const ag = data.active_group || {};
         setText("ag-anchor-vwap", ag.anchor_vwap);
         setText("ag-anchor-time", ag.anchor_time);
@@ -994,7 +1003,6 @@ def table_view():
         setText("ag-buys", ag.buys_count);
         setText("ag-drop-inc", ag.drop_increment);
 
-        // Position
         const pos = data.position || {};
         if (pos && Object.keys(pos).length) {
           setText("pos-qty", pos.qty);
@@ -1003,8 +1011,7 @@ def table_view():
           setText("pos-upl", fmtMoney(pos.unrealized_pl));
         }
 
-        // Potential Profit box:
-        // (Sell Target - Avg Entry) * Qty, plus per-share
+        // Potential Profit: (Sell Target - Avg Entry) * Qty
         const sellTarget = num(ag.sell_target);
         const avgEntry = num(pos.avg_entry);
         const qty = num(pos.qty);
@@ -1038,14 +1045,13 @@ def table_view():
         setAcct("initial_margin");
         setAcct("maintenance_margin");
 
-        // Ladder: WAITING row first, then newest-first fills
+        // Ladder
         const ladderBody = document.getElementById("ladder-body");
         if (ladderBody) {
           ladderBody.innerHTML = "";
 
-          const rows = data.active_group_triggers || []; // newest-first fills
+          const rows = data.active_group_triggers || [];
 
-          // WAITING row at TOP
           if (ag && ag.next_buy_price != null && ag.buys_count != null) {
             const nextTrigger = Number(ag.buys_count) + 1;
             const intendedDropNext = Math.floor((nextTrigger - 1) / 5) + 1;
@@ -1063,7 +1069,6 @@ def table_view():
             ladderBody.appendChild(trW);
           }
 
-          // Then newest-first filled rows
           rows.forEach((r) => {
             const tr = document.createElement("tr");
             tr.innerHTML = `
@@ -1094,8 +1099,6 @@ def table_view():
         if (!tbody) return;
 
         tbody.innerHTML = "";
-
-        // cycles are newest-first already
         data.cycles.forEach((c, i) => {
           const row = document.createElement("tr");
           row.innerHTML = `
@@ -1116,11 +1119,9 @@ def table_view():
       }
     }
 
-    // Initial load
     refreshReport();
     loadCycles();
 
-    // Auto-refresh loop
     setInterval(() => {
       refreshReport();
       loadCycles();
@@ -1133,9 +1134,8 @@ def table_view():
     return Response("\n".join(html), mimetype="text/html")
 
 
-# Start the BUY/SELL push watcher when the app loads (Render/Gunicorn safe)
+# Start the BUY/SELL push watcher when the app loads
 start_fill_watcher()
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
