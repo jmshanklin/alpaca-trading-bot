@@ -50,16 +50,7 @@ def send_push(title: str, message: str):
         print("Push send error:", e)
 
 
-# -------------------------
-# WATCHER STATUS (Step 6)
-# -------------------------
-WATCHER_STATUS = {
-    "started": False,
-    "initialized": False,
-    "last_seen_time": None,
-    "last_seen_id": None,
-    "last_error": None,
-}
+
 
 _WATCHER_THREAD_STARTED = False  # guard: only start once per process
 
@@ -69,6 +60,13 @@ _WATCHER_THREAD_STARTED = False  # guard: only start once per process
 # -------------------------
 _PUSH_STATE_PATH = "/tmp/pushover_last_fill.json"  # survives during runtime; resets if service restarts
 
+WATCHER_STATUS = {
+    "started": False,
+    "initialized": False,
+    "last_seen_time": None,
+    "last_seen_id": None,
+    "last_error": None,
+}
 
 def _load_push_state():
     try:
