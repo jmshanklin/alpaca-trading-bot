@@ -528,6 +528,72 @@ def push_test():
 def watcher_status():
     return jsonify({"ok": True, "watcher": WATCHER_STATUS})
 
+@app.route("/watcher_debug")
+def watcher_debug():
+    """
+    TEMP debug:
+    Shows what the watcher is seeing and how it decides what's "new".
+    """
+    try:
+        # Pull last 2 days of fills like the watcher does
+        after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
+        acts = api.get_activities(activity_types="FILL", after=after)
+
+        # Filter to TSLA buy/sell fills
+        fills = []
+        for a in acts:
+            if _get_attr(a, "symbol") != "TSLA":
+                continue
+            side = _get_attr(a, "side")
+            if side not in ("buy", "sell"):
+                continue
+            fills.append(a)
+
+        # newest-first
+        fills.sort(key=_get_fill_time, reverse=True)
+
+        # What does the watcher THINK is the baseline?
+        last_seen_time = None
+        try:
+            last_seen_time = _load_push_state().get("last_seen_time")
+        except Exception:
+            last_seen_time = None
+
+        last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
+
+        top = []
+        new_candidates = []
+
+        for a in fills[:15]:
+            aid = _fill_unique_id(a)
+            atime = _get_fill_time(a)
+            row = {
+                "id": aid,
+                "time_utc": atime.isoformat() if hasattr(atime, "isoformat") else str(atime),
+                "time_ct": to_central(atime),
+                "side": _get_attr(a, "side"),
+                "qty": _get_attr(a, "qty"),
+                "price": _get_attr(a, "price"),
+            }
+            top.append(row)
+
+            if last_dt and atime > last_dt:
+                new_candidates.append(row)
+
+        return jsonify(
+            {
+                "ok": True,
+                "watcher_status": WATCHER_STATUS,
+                "state_last_seen_time": last_seen_time,
+                "state_last_seen_dt_parsed": last_dt.isoformat() if last_dt else None,
+                "tsla_fill_count_last_2d": len(fills),
+                "top_15_tsla_fills_newest_first": top,
+                "would_count_as_new_right_now": new_candidates,
+            }
+        )
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/report")
 def report():
