@@ -4,6 +4,9 @@ import requests
 import alpaca_trade_api as tradeapi
 import pytz
 from flask import Flask, Response, jsonify
+import json
+import time
+import threading
 
 app = Flask(__name__)
 
@@ -43,7 +46,138 @@ def send_push(title: str, message: str):
         )
     except Exception as e:
         print("Push send error:", e)
+        
+# -------------------------
+# BUY/SELL FILL WATCHER -> PUSH ALERTS
+# -------------------------
+_PUSH_STATE_PATH = "/tmp/pushover_last_fill.json"  # persists during runtime; resets if service restarts
 
+
+def _load_push_state():
+    try:
+        with open(_PUSH_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_push_state(state: dict):
+    try:
+        with open(_PUSH_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+
+def _get_fill_time(act):
+    ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+    if isinstance(ts, str):
+        dt = _parse_iso_time(ts)
+        return dt or datetime.min
+    return ts or datetime.min
+
+
+def _fill_unique_id(act):
+    # activity id is best; fallback to order_id
+    return str(_get_attr(act, "id") or _get_attr(act, "activity_id") or _get_attr(act, "order_id") or "")
+
+
+def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
+    state = _load_push_state()
+    initialized = state.get("initialized", False)
+    last_seen_id = state.get("last_seen_id")
+    last_seen_time = state.get("last_seen_time")  # iso string
+
+    while True:
+        try:
+            after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
+            acts = api.get_activities(activity_types="FILL", after=after)
+
+            # Filter to TSLA buy/sell fills
+            fills = []
+            for a in acts:
+                if _get_attr(a, "symbol") != symbol:
+                    continue
+                side = _get_attr(a, "side")
+                if side not in ("buy", "sell"):
+                    continue
+                fills.append(a)
+
+            # newest-first
+            fills.sort(key=_get_fill_time, reverse=True)
+
+            if fills:
+                newest = fills[0]
+                newest_id = _fill_unique_id(newest)
+                newest_time = _get_fill_time(newest)
+
+                # First run: set baseline only (no alerts)
+                if not initialized:
+                    state["initialized"] = True
+                    state["last_seen_id"] = newest_id
+                    state["last_seen_time"] = newest_time.isoformat()
+                    _save_push_state(state)
+                    print("Fill watcher initialized (no startup spam).")
+                    time.sleep(poll_seconds)
+                    continue
+
+                # Determine "new" fills since last_seen_time
+                last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
+
+                new_items = []
+                for a in fills:
+                    aid = _fill_unique_id(a)
+                    atime = _get_fill_time(a)
+
+                    if last_dt and atime <= last_dt:
+                        continue
+                    if last_seen_id and aid == last_seen_id:
+                        continue
+
+                    new_items.append(a)
+
+                # send oldest-first so notifications arrive in order
+                new_items.sort(key=_get_fill_time)
+
+                for a in new_items:
+                    side = _get_attr(a, "side")
+                    qty = _get_attr(a, "qty")
+                    price = _get_attr(a, "price")
+                    atime = _get_fill_time(a)
+
+                    side_upper = str(side).upper()
+                    title = f"TSLA {side_upper} FILL"
+                    msg = (
+                        f"Qty: {qty} @ ${money(price)}\n"
+                        f"Time: {to_central(atime)}"
+                    )
+
+                    send_push(title, msg)
+
+                    # advance state after each sent
+                    state["last_seen_id"] = _fill_unique_id(a)
+                    state["last_seen_time"] = atime.isoformat()
+                    _save_push_state(state)
+
+        except Exception as e:
+            print("Fill watcher error:", str(e))
+
+        time.sleep(poll_seconds)
+
+
+def start_fill_watcher():
+    if not ENABLE_PUSH_ALERTS:
+        print("Push alerts disabled (ENABLE_PUSH_ALERTS != 1).")
+        return
+
+    t = threading.Thread(
+        target=_watch_fills_and_push,
+        kwargs={"symbol": "TSLA", "poll_seconds": 15},
+        daemon=True,
+    )
+    t.start()
+    print("Fill watcher started.")
+        
 # -------------------------
 # Helpers
 # -------------------------
@@ -997,6 +1131,10 @@ def table_view():
 
     html.append("</body></html>")
     return Response("\n".join(html), mimetype="text/html")
+
+
+# Start the BUY/SELL push watcher when the app loads (Render/Gunicorn safe)
+start_fill_watcher()
 
 
 if __name__ == "__main__":
