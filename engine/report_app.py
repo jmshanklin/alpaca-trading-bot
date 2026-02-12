@@ -112,6 +112,7 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
         try:
             after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
             acts = api.get_activities(activity_types="FILL", after=after)
+            send_push("Watcher heartbeat", f"Polling OK: got {len(acts)} fills in last 2 days")
 
             # Filter to TSLA buy/sell fills
             fills = []
