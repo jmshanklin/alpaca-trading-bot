@@ -26,6 +26,27 @@ MY_PHONE_NUMBER = os.getenv("MY_PHONE_NUMBER")  # must be like +1XXXXXXXXXX
 
 def twilio_ready():
     return all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, MY_PHONE_NUMBER])
+    
+def _send_sms(text: str):
+    """
+    Sends an SMS via Twilio. Used for test + later for buy/sell alerts.
+    """
+    if not ENABLE_SMS_ALERTS:
+        return False, "ENABLE_SMS_ALERTS is false"
+
+    if not twilio_ready():
+        return False, "Twilio env vars missing"
+
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(
+            body=text,
+            from_=TWILIO_FROM_NUMBER,
+            to=MY_PHONE_NUMBER,
+        )
+        return True, "sent"
+    except Exception as e:
+        return False, str(e)
 
 # -------------------------
 # Helpers
@@ -351,6 +372,15 @@ def sms_status():
             "my_phone_number_last4": (MY_PHONE_NUMBER[-4:] if MY_PHONE_NUMBER else None),
         }
     )
+    
+@app.route("/sms_test")
+def sms_test():
+    """
+    Sends ONE test SMS to your phone. Safe to confirm Twilio delivery.
+    """
+    now_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
+    ok, msg = _send_sms(f"TEST OK ✅\nTSLA SMS alerts are working.\nTime: {now_ct}")
+    return jsonify({"ok": ok, "message": msg})
 
 @app.route("/report")
 def report():
