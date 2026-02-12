@@ -91,27 +91,52 @@ def _get_fill_time(act):
         return dt or datetime.min
     return ts or datetime.min
 
-
 def _fill_unique_id(act):
     # activity id is best; fallback to order_id
     return str(_get_attr(act, "id") or _get_attr(act, "activity_id") or _get_attr(act, "order_id") or "")
 
-
 def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
+    """
+    Watches Alpaca FILL activities and sends ONE push per ORDER (order_id),
+    not one push per fill-chunk. It batches fills until the order is "quiet".
+    """
     global WATCHER_STATUS
+
+    QUIET_SECONDS = 2  # order considered "done" if no new fills for this long
 
     state = _load_push_state()
     initialized = state.get("initialized", False)
+    last_seen_time = state.get("last_seen_time")  # ISO string baseline
+    last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
 
-    last_seen_id = state.get("last_seen_id")
-    last_seen_time = state.get("last_seen_time")  # ISO string
+    # Pending aggregated orders not yet alerted:
+    # order_id -> {side, qty, pv, first_fill_iso, last_fill_iso}
+    pending = state.get("pending_orders", {}) or {}
+
+    def _utc_now():
+        return datetime.utcnow().replace(tzinfo=pytz.utc)
+
+    def _as_dt(x):
+        """Return tz-aware datetime (UTC) or None."""
+        if x is None:
+            return None
+        if isinstance(x, str):
+            dt = _parse_iso_time(x)
+        elif isinstance(x, datetime):
+            dt = x
+        else:
+            return None
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = pytz.utc.localize(dt)
+        return dt.astimezone(pytz.utc)
 
     while True:
         try:
             after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
             acts = api.get_activities(activity_types="FILL", after=after)
-            
-            # Filter to TSLA buy/sell fills
+
             fills = []
             for a in acts:
                 if _get_attr(a, "symbol") != symbol:
@@ -121,87 +146,122 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
                     continue
                 fills.append(a)
 
-            # newest-first
-            fills.sort(key=_get_fill_time, reverse=True)
+            fills.sort(key=_get_fill_time, reverse=True)  # newest-first
 
             if fills:
                 newest = fills[0]
-                newest_id = _fill_unique_id(newest)
-                newest_time = _get_fill_time(newest)
+                newest_time = _as_dt(_get_fill_time(newest))
 
-                # First run: set baseline only (no alerts)
+                # First run: baseline only (no alerts)
                 if not initialized:
                     state["initialized"] = True
-                    state["last_seen_id"] = newest_id
-                    state["last_seen_time"] = newest_time.isoformat()
+                    if newest_time:
+                        state["last_seen_time"] = newest_time.isoformat()
+                    state["pending_orders"] = {}  # clear pending on first init
                     _save_push_state(state)
-
-                    print("Fill watcher initialized (no startup spam).")
 
                     WATCHER_STATUS["initialized"] = True
                     WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
                     WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
-
                     initialized = True
-                    last_seen_id = state.get("last_seen_id")
-                    last_seen_time = state.get("last_seen_time")
-
+                    last_dt = _as_dt(state.get("last_seen_time"))
                     time.sleep(poll_seconds)
                     continue
 
-                # Determine "new" fills since last_seen_time
-                last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
+                # Collect "new" fills since last_seen_time into pending orders
+                now_utc = _utc_now()
 
-                new_items = []
                 for a in fills:
-                    aid = _fill_unique_id(a)
-                    atime = _get_fill_time(a)
+                    atime = _as_dt(_get_fill_time(a))
+                    if atime is None:
+                        continue
 
+                    # only consider fills newer than our baseline
                     if last_dt and atime <= last_dt:
                         continue
-                    if last_seen_id and aid == last_seen_id:
+
+                    oid = _get_attr(a, "order_id") or _fill_unique_id(a)
+                    side = _get_attr(a, "side")
+                    qty = float(_get_attr(a, "qty", 0) or 0)
+                    price = float(_get_attr(a, "price", 0) or 0)
+
+                    if qty <= 0:
                         continue
 
-                    new_items.append(a)
+                    p = pending.get(oid) or {
+                        "symbol": symbol,
+                        "side": side,
+                        "qty": 0.0,
+                        "pv": 0.0,
+                        "first_fill_iso": atime.isoformat(),
+                        "last_fill_iso": atime.isoformat(),
+                    }
 
-                # send oldest-first so notifications arrive in order
-                new_items.sort(key=_get_fill_time)
+                    p["qty"] += qty
+                    p["pv"] += qty * price
 
-                for a in new_items:
-                    side = _get_attr(a, "side")
-                    qty = _get_attr(a, "qty")
-                    price = _get_attr(a, "price")
-                    atime = _get_fill_time(a)
+                    # Track earliest + latest fill times
+                    first_dt = _as_dt(p.get("first_fill_iso"))
+                    lastp_dt = _as_dt(p.get("last_fill_iso"))
+                    if first_dt is None or atime < first_dt:
+                        p["first_fill_iso"] = atime.isoformat()
+                    if lastp_dt is None or atime > lastp_dt:
+                        p["last_fill_iso"] = atime.isoformat()
 
-                    side_upper = str(side).upper()
-                    title = f"TSLA {side_upper} FILL"
-                    now_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
+                    p["side"] = side  # keep latest side just in case
+                    pending[oid] = p
+
+                    # advance baseline to newest time we've processed
+                    if last_dt is None or atime > last_dt:
+                        last_dt = atime
+
+                # Send pushes for any pending order that is now "quiet"
+                # (no new fills for QUIET_SECONDS)
+                to_delete = []
+                for oid, p in pending.items():
+                    last_fill_dt = _as_dt(p.get("last_fill_iso"))
+                    if last_fill_dt is None:
+                        continue
+
+                    if (now_utc - last_fill_dt).total_seconds() < QUIET_SECONDS:
+                        continue  # still receiving fills
+
+                    qty_total = p.get("qty", 0.0)
+                    pv = p.get("pv", 0.0)
+                    vwap = (pv / qty_total) if qty_total else None
+
+                    side_upper = str(p.get("side", "")).upper()
+                    title = f"{symbol} {side_upper} FILLED (ORDER)"
+
+                    fill_time_ct = to_central(last_fill_dt)
+                    seen_time_ct = to_central(now_utc)
+
                     msg = (
-                        f"Qty: {qty} @ ${money(price)}\n"
-                        f"Fill: {to_central(atime)}\n"
-                        f"Seen: {now_ct}"
+                        f"Qty: {int(round(qty_total))} @ ${money(vwap) if vwap is not None else ''} (VWAP)\n"
+                        f"Fill: {fill_time_ct}\n"
+                        f"Seen: {seen_time_ct}"
                     )
+
                     send_push(title, msg)
+                    to_delete.append(oid)
 
-                    # advance state after each sent
-                    state["last_seen_id"] = _fill_unique_id(a)
-                    state["last_seen_time"] = atime.isoformat()
-                    _save_push_state(state)
+                for oid in to_delete:
+                    pending.pop(oid, None)
 
-                    # update watcher status
-                    WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
-                    WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
+                # Persist state + watcher status
+                state["pending_orders"] = pending
+                if last_dt:
+                    state["last_seen_time"] = last_dt.isoformat()
+                _save_push_state(state)
 
-                # keep local copies updated too
-                last_seen_id = state.get("last_seen_id")
-                last_seen_time = state.get("last_seen_time")
+                WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
+                WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
 
         except Exception as e:
             print("Fill watcher error:", str(e))
             WATCHER_STATUS["last_error"] = str(e)
 
         time.sleep(poll_seconds)
-
 
 def start_fill_watcher():
     global _WATCHER_THREAD_STARTED
