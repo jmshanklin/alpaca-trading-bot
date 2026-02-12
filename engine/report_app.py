@@ -175,7 +175,12 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
 
                     side_upper = str(side).upper()
                     title = f"TSLA {side_upper} FILL"
-                    msg = f"Qty: {qty} @ ${money(price)}\nTime: {to_central(atime)}"
+                    now_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
+                    msg = (
+                        f"Qty: {qty} @ ${money(price)}\n"
+                        f"Fill: {to_central(atime)}\n"
+                        f"Seen: {now_ct}"
+                    )
                     send_push(title, msg)
 
                     # advance state after each sent
