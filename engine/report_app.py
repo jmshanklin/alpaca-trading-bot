@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import requests
 import alpaca_trade_api as tradeapi
 import pytz
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 
 app = Flask(__name__)
 
@@ -23,6 +23,37 @@ api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
 ENABLE_PUSH_ALERTS = os.getenv("ENABLE_PUSH_ALERTS", "0") == "1"
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
+
+# -------------------------
+# OPTIONAL: SECURE MANUAL TEST TRADES (RECOMMENDED)
+# -------------------------
+ENABLE_MANUAL_TRADES = os.getenv("ENABLE_MANUAL_TRADES", "0") == "1"
+TRADE_TOKEN = os.getenv("TRADE_TOKEN", "")
+ALLOW_LIVE_MANUAL_TRADES = os.getenv("ALLOW_LIVE_MANUAL_TRADES", "0") == "1"
+
+
+def _is_paper_url(url: str) -> bool:
+    u = (url or "").lower()
+    return "paper-api.alpaca.markets" in u or "paper" in u
+
+
+def _require_trade_auth() -> tuple[bool, str]:
+    """Return (ok, message). Requires ENABLE_MANUAL_TRADES=1 and token match."""
+    if not ENABLE_MANUAL_TRADES:
+        return False, "Manual trades are disabled (set ENABLE_MANUAL_TRADES=1)."
+
+    if not TRADE_TOKEN:
+        return False, "TRADE_TOKEN is not set on the server."
+
+    supplied = request.headers.get("X-TRADE-TOKEN", "")
+    if supplied != TRADE_TOKEN:
+        return False, "Unauthorized (missing/invalid X-TRADE-TOKEN)."
+
+    # Protect live by default unless explicitly allowed
+    if (not _is_paper_url(BASE_URL)) and (not ALLOW_LIVE_MANUAL_TRADES):
+        return False, "Live manual trades blocked (set ALLOW_LIVE_MANUAL_TRADES=1 to enable)."
+
+    return True, "ok"
 
 
 def send_push(title: str, message: str):
@@ -50,10 +81,7 @@ def send_push(title: str, message: str):
         print("Push send error:", e)
 
 
-
-
 _WATCHER_THREAD_STARTED = False  # guard: only start once per process
-
 
 # -------------------------
 # BUY/SELL FILL WATCHER -> PUSH ALERTS
@@ -67,6 +95,7 @@ WATCHER_STATUS = {
     "last_seen_id": None,
     "last_error": None,
 }
+
 
 def _load_push_state():
     try:
@@ -84,210 +113,6 @@ def _save_push_state(state: dict):
         pass
 
 
-def _get_fill_time(act):
-    ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-    if isinstance(ts, str):
-        dt = _parse_iso_time(ts)
-        return dt or datetime.min
-    return ts or datetime.min
-
-def _fill_unique_id(act):
-    # activity id is best; fallback to order_id
-    return str(_get_attr(act, "id") or _get_attr(act, "activity_id") or _get_attr(act, "order_id") or "")
-
-def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
-    """
-    Watches Alpaca FILL activities and sends ONE push per ORDER (order_id),
-    not one push per fill-chunk. It batches fills until the order is "quiet".
-    """
-    global WATCHER_STATUS
-
-    QUIET_SECONDS = 2  # order considered "done" if no new fills for this long
-
-    state = _load_push_state()
-    initialized = state.get("initialized", False)
-    last_seen_time = state.get("last_seen_time")  # ISO string baseline
-    last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
-
-    # Pending aggregated orders not yet alerted:
-    # order_id -> {side, qty, pv, first_fill_iso, last_fill_iso}
-    pending = state.get("pending_orders", {}) or {}
-
-    def _utc_now():
-        return datetime.utcnow().replace(tzinfo=pytz.utc)
-
-    def _as_dt(x):
-        """Return tz-aware datetime (UTC) or None."""
-        if x is None:
-            return None
-        if isinstance(x, str):
-            dt = _parse_iso_time(x)
-        elif isinstance(x, datetime):
-            dt = x
-        else:
-            return None
-        if dt is None:
-            return None
-        if dt.tzinfo is None:
-            dt = pytz.utc.localize(dt)
-        return dt.astimezone(pytz.utc)
-
-    while True:
-        try:
-            after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
-            acts = api.get_activities(activity_types="FILL", after=after)
-
-            fills = []
-            for a in acts:
-                if _get_attr(a, "symbol") != symbol:
-                    continue
-                side = _get_attr(a, "side")
-                if side not in ("buy", "sell"):
-                    continue
-                fills.append(a)
-
-            fills.sort(key=_get_fill_time, reverse=True)  # newest-first
-
-            if fills:
-                newest = fills[0]
-                newest_time = _as_dt(_get_fill_time(newest))
-
-                # First run: baseline only (no alerts)
-                if not initialized:
-                    state["initialized"] = True
-                    if newest_time:
-                        state["last_seen_time"] = newest_time.isoformat()
-                    state["pending_orders"] = {}  # clear pending on first init
-                    _save_push_state(state)
-
-                    WATCHER_STATUS["initialized"] = True
-                    WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
-                    WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
-                    initialized = True
-                    last_dt = _as_dt(state.get("last_seen_time"))
-                    time.sleep(poll_seconds)
-                    continue
-
-                # Collect "new" fills since last_seen_time into pending orders
-                now_utc = _utc_now()
-
-                for a in fills:
-                    atime = _as_dt(_get_fill_time(a))
-                    if atime is None:
-                        continue
-
-                    # only consider fills newer than our baseline
-                    if last_dt and atime <= last_dt:
-                        continue
-
-                    oid = _get_attr(a, "order_id") or _fill_unique_id(a)
-                    side = _get_attr(a, "side")
-                    qty = float(_get_attr(a, "qty", 0) or 0)
-                    price = float(_get_attr(a, "price", 0) or 0)
-
-                    if qty <= 0:
-                        continue
-
-                    p = pending.get(oid) or {
-                        "symbol": symbol,
-                        "side": side,
-                        "qty": 0.0,
-                        "pv": 0.0,
-                        "first_fill_iso": atime.isoformat(),
-                        "last_fill_iso": atime.isoformat(),
-                    }
-
-                    p["qty"] += qty
-                    p["pv"] += qty * price
-
-                    # Track earliest + latest fill times
-                    first_dt = _as_dt(p.get("first_fill_iso"))
-                    lastp_dt = _as_dt(p.get("last_fill_iso"))
-                    if first_dt is None or atime < first_dt:
-                        p["first_fill_iso"] = atime.isoformat()
-                    if lastp_dt is None or atime > lastp_dt:
-                        p["last_fill_iso"] = atime.isoformat()
-
-                    p["side"] = side  # keep latest side just in case
-                    pending[oid] = p
-
-                    # advance baseline to newest time we've processed
-                    if last_dt is None or atime > last_dt:
-                        last_dt = atime
-
-                # Send pushes for any pending order that is now "quiet"
-                # (no new fills for QUIET_SECONDS)
-                to_delete = []
-                for oid, p in pending.items():
-                    last_fill_dt = _as_dt(p.get("last_fill_iso"))
-                    if last_fill_dt is None:
-                        continue
-
-                    if (now_utc - last_fill_dt).total_seconds() < QUIET_SECONDS:
-                        continue  # still receiving fills
-
-                    qty_total = p.get("qty", 0.0)
-                    pv = p.get("pv", 0.0)
-                    vwap = (pv / qty_total) if qty_total else None
-
-                    side_upper = str(p.get("side", "")).upper()
-                    title = f"{symbol} {side_upper} FILLED (ORDER)"
-
-                    fill_time_ct = to_central(last_fill_dt)
-                    seen_time_ct = to_central(now_utc)
-
-                    msg = (
-                        f"Qty: {int(round(qty_total))} @ ${money(vwap) if vwap is not None else ''} (VWAP)\n"
-                        f"Fill: {fill_time_ct}\n"
-                        f"Seen: {seen_time_ct}"
-                    )
-
-                    send_push(title, msg)
-                    to_delete.append(oid)
-
-                for oid in to_delete:
-                    pending.pop(oid, None)
-
-                # Persist state + watcher status
-                state["pending_orders"] = pending
-                if last_dt:
-                    state["last_seen_time"] = last_dt.isoformat()
-                _save_push_state(state)
-
-                WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
-                WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
-
-        except Exception as e:
-            print("Fill watcher error:", str(e))
-            WATCHER_STATUS["last_error"] = str(e)
-
-        time.sleep(poll_seconds)
-
-def start_fill_watcher():
-    global _WATCHER_THREAD_STARTED
-
-    if not ENABLE_PUSH_ALERTS:
-        print("Push alerts disabled (ENABLE_PUSH_ALERTS != 1).")
-        return
-
-    if _WATCHER_THREAD_STARTED:
-        return
-
-    t = threading.Thread(
-        target=_watch_fills_and_push,
-        kwargs={"symbol": "TSLA", "poll_seconds": 15},
-        daemon=True,
-    )
-    t.start()
-    _WATCHER_THREAD_STARTED = True
-
-    WATCHER_STATUS["started"] = True
-    print("Fill watcher started.")
-
-
-# -------------------------
-# Helpers
-# -------------------------
 def _get_attr(obj, name, default=None):
     """Works whether Alpaca returns an object or dict-like."""
     try:
@@ -346,65 +171,150 @@ def money0(x):
         return str(x)
 
 
+def _get_fill_time(act):
+    # Use transaction_time if available; fall back to time/timestamp
+    ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
+    if isinstance(ts, str):
+        dt = _parse_iso_time(ts)
+        return dt or datetime.min
+    return ts or datetime.min
+
+
+def _fill_unique_id(act):
+    # activity id is best; fallback to order_id
+    return str(_get_attr(act, "id") or _get_attr(act, "activity_id") or _get_attr(act, "order_id") or "")
+
+
+def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
+    global WATCHER_STATUS
+
+    state = _load_push_state()
+    initialized = state.get("initialized", False)
+    last_seen_id = state.get("last_seen_id")
+    last_seen_time = state.get("last_seen_time")  # ISO string
+
+    while True:
+        try:
+            after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
+            acts = api.get_activities(activity_types="FILL", after=after)
+
+            # Filter to TSLA buy/sell fills
+            fills = []
+            for a in acts:
+                if _get_attr(a, "symbol") != symbol:
+                    continue
+                side = _get_attr(a, "side")
+                if side not in ("buy", "sell"):
+                    continue
+                fills.append(a)
+
+            # newest-first
+            fills.sort(key=_get_fill_time, reverse=True)
+
+            if fills:
+                newest = fills[0]
+                newest_id = _fill_unique_id(newest)
+                newest_time = _get_fill_time(newest)
+
+                # First run: set baseline only (no alerts)
+                if not initialized:
+                    state["initialized"] = True
+                    state["last_seen_id"] = newest_id
+                    state["last_seen_time"] = newest_time.isoformat()
+                    _save_push_state(state)
+
+                    WATCHER_STATUS["initialized"] = True
+                    WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
+                    WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
+
+                    initialized = True
+                    last_seen_id = state.get("last_seen_id")
+                    last_seen_time = state.get("last_seen_time")
+
+                    print("Fill watcher initialized (no startup spam).")
+                    time.sleep(poll_seconds)
+                    continue
+
+                last_dt = _parse_iso_time(last_seen_time) if isinstance(last_seen_time, str) else None
+
+                new_items = []
+                for a in fills:
+                    aid = _fill_unique_id(a)
+                    atime = _get_fill_time(a)
+
+                    if last_dt and atime <= last_dt:
+                        continue
+                    if last_seen_id and aid == last_seen_id:
+                        continue
+
+                    new_items.append(a)
+
+                # send oldest-first so notifications arrive in order
+                new_items.sort(key=_get_fill_time)
+
+                for a in new_items:
+                    side = _get_attr(a, "side")
+                    qty = _get_attr(a, "qty")
+                    price = _get_attr(a, "price")
+                    atime = _get_fill_time(a)
+
+                    # Seen time = when our watcher noticed it (CT)
+                    seen_ct = to_central(datetime.utcnow().replace(tzinfo=pytz.utc))
+                    fill_ct = to_central(atime)
+
+                    side_upper = str(side).upper()
+                    title = f"TSLA {side_upper} FILL"
+                    msg = (
+                        f"Qty: {qty} @ ${money(price)}\n"
+                        f"Fill: {fill_ct}\n"
+                        f"Seen: {seen_ct}"
+                    )
+
+                    send_push(title, msg)
+
+                    # advance state after each sent
+                    state["last_seen_id"] = _fill_unique_id(a)
+                    state["last_seen_time"] = atime.isoformat()
+                    _save_push_state(state)
+
+                    WATCHER_STATUS["last_seen_time"] = state.get("last_seen_time")
+                    WATCHER_STATUS["last_seen_id"] = state.get("last_seen_id")
+
+                last_seen_id = state.get("last_seen_id")
+                last_seen_time = state.get("last_seen_time")
+
+        except Exception as e:
+            print("Fill watcher error:", str(e))
+            WATCHER_STATUS["last_error"] = str(e)
+
+        time.sleep(poll_seconds)
+
+
+def start_fill_watcher():
+    global _WATCHER_THREAD_STARTED
+
+    if not ENABLE_PUSH_ALERTS:
+        print("Push alerts disabled (ENABLE_PUSH_ALERTS != 1).")
+        return
+
+    if _WATCHER_THREAD_STARTED:
+        return
+
+    t = threading.Thread(
+        target=_watch_fills_and_push,
+        kwargs={"symbol": "TSLA", "poll_seconds": 15},
+        daemon=True,
+    )
+    t.start()
+    _WATCHER_THREAD_STARTED = True
+
+    WATCHER_STATUS["started"] = True
+    print("Fill watcher started.")
+
+
 # -------------------------
-# Aggregation + Cycles
+# Aggregation helpers
 # -------------------------
-def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy"):
-    """
-    Turn Alpaca FILL activities into one row per order_id.
-    Returns rows newest-first.
-    """
-    grouped = {}
-
-    for act in activities:
-        symbol = _get_attr(act, "symbol")
-        side = _get_attr(act, "side")
-        if only_symbol and symbol != only_symbol:
-            continue
-        if only_side and side != only_side:
-            continue
-
-        oid = _get_attr(act, "order_id")
-        qty = float(_get_attr(act, "qty", 0) or 0)
-        price = float(_get_attr(act, "price", 0) or 0)
-        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-
-        if oid is None:
-            oid = f"noid:{symbol}:{side}:{ts}:{price}:{qty}"
-
-        g = grouped.setdefault(
-            oid,
-            {"order_id": oid, "time": ts, "side": side, "symbol": symbol, "filled_qty": 0.0, "pv": 0.0},
-        )
-
-        g["filled_qty"] += qty
-        g["pv"] += qty * price
-
-        # keep earliest time if comparable
-        if ts and g["time"] and ts < g["time"]:
-            g["time"] = ts
-
-    rows = []
-    for _, g in grouped.items():
-        if g["filled_qty"] <= 0:
-            continue
-        vwap = g["pv"] / g["filled_qty"]
-        rows.append(
-            {
-                "time": g["time"].isoformat() if hasattr(g["time"], "isoformat") else str(g["time"]),
-                "symbol": g["symbol"],
-                "side": g["side"],
-                "filled_qty": int(round(g["filled_qty"])),
-                "vwap": round(float(vwap), 4),
-                "total_dollars": round(float(g["pv"]), 2),
-                "order_id": g["order_id"],
-            }
-        )
-
-    rows.sort(key=lambda r: r["time"], reverse=True)  # newest-first
-    return rows
-
-
 def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
     """
     Aggregates both buys and sells, one row per order_id.
@@ -418,6 +328,9 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
             continue
 
         side = _get_attr(act, "side")
+        if side not in ("buy", "sell"):
+            continue
+
         oid = _get_attr(act, "order_id")
         qty = float(_get_attr(act, "qty", 0) or 0)
         price = float(_get_attr(act, "price", 0) or 0)
@@ -434,7 +347,7 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
         g["filled_qty"] += qty
         g["pv"] += qty * price
 
-        # keep earliest time
+        # keep earliest time (best effort)
         if ts and g["time"] and ts < g["time"]:
             g["time"] = ts
 
@@ -459,28 +372,105 @@ def aggregate_fills_all_sides_by_order_id(activities, only_symbol="TSLA"):
     return rows
 
 
-def build_trade_cycles_from_order_rows(order_rows):
+def aggregate_fills_by_order_id(activities, only_symbol="TSLA", only_side="buy"):
     """
-    Build closed trade cycles:
-    multiple BUY orders -> one SELL order closes the group.
-    Output: cycles newest-first.
+    One row per order_id (filtered to side), returns newest-first.
+    """
+    rows_all = aggregate_fills_all_sides_by_order_id(activities, only_symbol=only_symbol)
+    out = []
+    for r in rows_all:
+        if only_side and r.get("side") != only_side:
+            continue
+        out.append(r)
+    out.sort(key=lambda r: r["time"], reverse=True)
+    return out
+
+
+def _dt_from_any(t):
+    if isinstance(t, datetime):
+        return t
+    if isinstance(t, str):
+        return _parse_iso_time(t) or datetime.min
+    return datetime.min
+
+
+def find_last_flat_time_from_fills(order_rows):
+    """
+    Determine the most recent timestamp when net shares returned to 0.
+    Uses order_rows (one row per order_id) oldest->newest.
+    """
+    ordered = list(reversed(order_rows))  # oldest-first
+    net = 0
+    last_flat_time = None
+    was_positive = False
+
+    for r in ordered:
+        side = r.get("side")
+        qty = int(r.get("filled_qty") or 0)
+        t = r.get("time")
+
+        if side == "buy":
+            net += qty
+            if net > 0:
+                was_positive = True
+        elif side == "sell":
+            net -= qty
+            if net < 0:
+                # can happen if you had earlier position outside our lookback; clamp
+                net = 0
+
+        if was_positive and net == 0:
+            last_flat_time = t
+            was_positive = False  # next cycle begins on next buy
+
+    return last_flat_time
+
+
+def build_closed_cycles_net_flat(order_rows):
+    """
+    Closed cycle = net shares go from 0 -> >0 -> back to 0.
+    Partial sells DO NOT close a cycle.
     """
     ordered = list(reversed(order_rows))  # oldest-first
     cycles = []
-    cur = None
 
-    def start_cycle(buy_row):
-        t = buy_row.get("time")
-        return {
-            "anchor_time_raw": t,
-            "anchor_time": fmt_ct_any(t),
-            "anchor_order_id": buy_row.get("order_id"),
-            "anchor_vwap": float(buy_row.get("vwap") or 0),
-            "buy_orders": 0,
-            "shares": 0,
-            "cost": 0.0,
-            "last_buy_time_raw": t,
-        }
+    net = 0
+    cost_basis = 0.0  # dollars for currently held shares (approx via buys-sells at vwap)
+    buy_orders = 0
+    shares_bought_total = 0
+
+    anchor_time = None
+    anchor_order_id = None
+    anchor_vwap = None
+
+    last_buy_time = None
+
+    def close_cycle(sell_time, sell_vwap, proceeds_total, total_cost):
+        realized_pl = proceeds_total - total_cost
+        realized_pl_pct = (realized_pl / total_cost * 100.0) if total_cost else None
+        cycles.append(
+            {
+                "anchor_time": fmt_ct_any(anchor_time),
+                "anchor_time_raw": anchor_time,
+                "anchor_order_id": anchor_order_id,
+                "anchor_vwap": round(float(anchor_vwap or 0), 4),
+                "shares": shares_bought_total,
+                "buy_orders": buy_orders,
+                "avg_entry": round((total_cost / shares_bought_total), 4) if shares_bought_total else None,
+                "sell_time": fmt_ct_any(sell_time),
+                "sell_time_raw": sell_time,
+                "sell_order_id": None,
+                "avg_exit": round(float(sell_vwap or 0), 4) if sell_vwap is not None else None,
+                "proceeds": round(float(proceeds_total), 2),
+                "cost": round(float(total_cost), 2),
+                "realized_pl": round(float(realized_pl), 2),
+                "realized_pl_pct": round(float(realized_pl_pct), 3) if realized_pl_pct is not None else None,
+            }
+        )
+
+    cycle_cost_total = 0.0
+    cycle_proceeds_total = 0.0
+    last_sell_vwap = None
 
     for r in ordered:
         side = r.get("side")
@@ -490,53 +480,40 @@ def build_trade_cycles_from_order_rows(order_rows):
         t = r.get("time")
 
         if side == "buy":
-            if cur is None:
-                cur = start_cycle(r)
-            cur["buy_orders"] += 1
-            cur["shares"] += qty
-            cur["cost"] += dollars
-            cur["last_buy_time_raw"] = t
+            if net == 0:
+                # start cycle
+                anchor_time = t
+                anchor_order_id = r.get("order_id")
+                anchor_vwap = vwap
+                buy_orders = 0
+                shares_bought_total = 0
+                cycle_cost_total = 0.0
+                cycle_proceeds_total = 0.0
+                last_sell_vwap = None
+
+            net += qty
+            buy_orders += 1
+            shares_bought_total += qty
+            cycle_cost_total += dollars
+            last_buy_time = t
 
         elif side == "sell":
-            if cur is None or cur["shares"] <= 0:
+            if net <= 0:
                 continue
 
-            proceeds = dollars
-            avg_entry = (cur["cost"] / cur["shares"]) if cur["shares"] else None
-            avg_exit = vwap
-            realized_pl = proceeds - cur["cost"]
-            realized_pl_pct = (realized_pl / cur["cost"] * 100.0) if cur["cost"] else None
+            net -= qty
+            if net < 0:
+                net = 0
 
-            cycles.append(
-                {
-                    "anchor_time": cur["anchor_time"],
-                    "anchor_time_raw": cur["anchor_time_raw"],
-                    "anchor_order_id": cur["anchor_order_id"],
-                    "anchor_vwap": round(cur["anchor_vwap"], 4),
-                    "shares": cur["shares"],
-                    "buy_orders": cur["buy_orders"],
-                    "avg_entry": round(avg_entry, 4) if avg_entry is not None else None,
-                    "sell_time": fmt_ct_any(t),
-                    "sell_time_raw": t,
-                    "sell_order_id": r.get("order_id"),
-                    "avg_exit": round(avg_exit, 4) if avg_exit is not None else None,
-                    "proceeds": round(proceeds, 2),
-                    "cost": round(cur["cost"], 2),
-                    "realized_pl": round(realized_pl, 2),
-                    "realized_pl_pct": round(realized_pl_pct, 3) if realized_pl_pct is not None else None,
-                }
-            )
+            cycle_proceeds_total += dollars
+            last_sell_vwap = vwap
 
-            cur = None
+            if net == 0:
+                close_cycle(t, last_sell_vwap, cycle_proceeds_total, cycle_cost_total)
+                # reset will happen naturally on next buy
 
-    def _sell_sort_key(c):
-        raw = c.get("sell_time_raw")
-        if isinstance(raw, str):
-            dt = _parse_iso_time(raw)
-            return dt or datetime.min
-        return raw or datetime.min
-
-    cycles.sort(key=_sell_sort_key, reverse=True)  # newest-first
+    # newest-first by sell time
+    cycles.sort(key=lambda c: _dt_from_any(c.get("sell_time_raw")), reverse=True)
     return cycles
 
 
@@ -544,20 +521,7 @@ def compute_cycles(days=30, symbol="TSLA"):
     after = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
     acts = api.get_activities(activity_types="FILL", after=after)
     orders = aggregate_fills_all_sides_by_order_id(acts, only_symbol=symbol)
-    return build_trade_cycles_from_order_rows(orders)
-
-
-def find_last_tsla_sell_time(activities):
-    """Return timestamp of most recent TSLA sell fill, else None."""
-    last = None
-    for act in activities:
-        symbol = _get_attr(act, "symbol")
-        side = _get_attr(act, "side")
-        ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-        if symbol == "TSLA" and side == "sell" and ts:
-            if last is None or ts > last:
-                last = ts
-    return last
+    return build_closed_cycles_net_flat(orders)
 
 
 def get_tsla_price_fallback():
@@ -591,6 +555,20 @@ def push_test():
 def watcher_status():
     return jsonify({"ok": True, "watcher": WATCHER_STATUS})
 
+
+@app.route("/pushover_status")
+def pushover_status():
+    return jsonify(
+        {
+            "ok": True,
+            "watcher": WATCHER_STATUS,
+            "push_enabled": ENABLE_PUSH_ALERTS,
+            "has_user_key": bool(PUSHOVER_USER_KEY),
+            "has_app_token": bool(PUSHOVER_APP_TOKEN),
+        }
+    )
+
+
 @app.route("/watcher_debug")
 def watcher_debug():
     """
@@ -598,11 +576,9 @@ def watcher_debug():
     Shows what the watcher is seeing and how it decides what's "new".
     """
     try:
-        # Pull last 2 days of fills like the watcher does
         after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
         acts = api.get_activities(activity_types="FILL", after=after)
 
-        # Filter to TSLA buy/sell fills
         fills = []
         for a in acts:
             if _get_attr(a, "symbol") != "TSLA":
@@ -612,10 +588,8 @@ def watcher_debug():
                 continue
             fills.append(a)
 
-        # newest-first
         fills.sort(key=_get_fill_time, reverse=True)
 
-        # What does the watcher THINK is the baseline?
         last_seen_time = None
         try:
             last_seen_time = _load_push_state().get("last_seen_time")
@@ -657,6 +631,44 @@ def watcher_debug():
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ---------
+# SECURE TEST TRADE ENDPOINTS (POST)
+# ---------
+@app.route("/trade_test/buy", methods=["POST"])
+def trade_test_buy():
+    ok, msg = _require_trade_auth()
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 403
+
+    qty = int(request.args.get("qty", "1"))
+    if qty <= 0:
+        return jsonify({"ok": False, "error": "qty must be > 0"}), 400
+
+    try:
+        o = api.submit_order(symbol="TSLA", qty=qty, side="buy", type="market", time_in_force="day")
+        return jsonify({"ok": True, "submitted": {"side": "buy", "qty": qty, "order_id": _get_attr(o, "id")}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/trade_test/sell", methods=["POST"])
+def trade_test_sell():
+    ok, msg = _require_trade_auth()
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 403
+
+    qty = int(request.args.get("qty", "1"))
+    if qty <= 0:
+        return jsonify({"ok": False, "error": "qty must be > 0"}), 400
+
+    try:
+        o = api.submit_order(symbol="TSLA", qty=qty, side="sell", type="market", time_in_force="day")
+        return jsonify({"ok": True, "submitted": {"side": "sell", "qty": qty, "order_id": _get_attr(o, "id")}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/report")
 def report():
@@ -703,14 +715,16 @@ def report():
             "position": position_data,
         }
 
-        # --- Active Group (computed from activities; one-group mode) ---
+        # --- Active Group (full-exit aware) ---
         try:
             after2 = (datetime.utcnow() - timedelta(days=10)).isoformat() + "Z"
             acts2 = api.get_activities(activity_types="FILL", after=after2)
 
-            last_sell_ts = find_last_tsla_sell_time(acts2)
+            # Build order rows (both sides), then compute last FLAT time (net shares hit 0)
+            order_rows_all = aggregate_fills_all_sides_by_order_id(acts2, only_symbol="TSLA")
+            last_flat_time = find_last_flat_time_from_fills(order_rows_all)
 
-            # filter to TSLA buys AFTER last sell
+            # Group buys AFTER last_flat_time (not after last sell)
             tsla_buys_after = []
             for act in acts2:
                 symbol = _get_attr(act, "symbol")
@@ -718,7 +732,7 @@ def report():
                 ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
                 if symbol != "TSLA" or side != "buy" or not ts:
                     continue
-                if last_sell_ts and ts <= last_sell_ts:
+                if last_flat_time and ts <= last_flat_time:
                     continue
                 tsla_buys_after.append(act)
 
@@ -729,12 +743,10 @@ def report():
             active_group_triggers = []
 
             if group_buys:
-                # Anchor lock: FIRST buy trigger after last sell (oldest by time)
+                # Anchor lock: FIRST buy trigger after last flat (oldest by time)
                 def _row_time(r):
                     t = r.get("time")
-                    if isinstance(t, str):
-                        return _parse_iso_time(t) or datetime.max
-                    return t or datetime.max
+                    return _dt_from_any(t) or datetime.max
 
                 anchor_row = min(group_buys, key=_row_time)
                 anchor_price = float(anchor_row["vwap"])
@@ -748,7 +760,6 @@ def report():
                 buys_count = len(group_buys)
                 stage = (buys_count - 1) // FIRST_INCREMENT_COUNT + 1
                 drop_increment = float(stage)
-
                 buys_in_this_stage = (buys_count - 1) % FIRST_INCREMENT_COUNT + 1
 
                 # compute next buy price
@@ -787,9 +798,10 @@ def report():
                     "distance_to_next_buy": distance_to_next_buy,
                     "anchor_time": fmt_ct_any(anchor_row.get("time")),
                     "anchor_order_id": anchor_row.get("order_id"),
+                    "last_flat_time": fmt_ct_any(last_flat_time) if last_flat_time else None,
                 }
 
-                # Build chronological first (oldest-first) so actual_drop is correct.
+                # chronological (oldest-first) so actual_drop is correct.
                 ladder_oldest_first = list(reversed(group_buys))  # oldest-first
                 prev_vwap = None
                 tmp_rows = []
@@ -812,12 +824,11 @@ def report():
                     )
                     prev_vwap = vwap
 
-                # Display newest-first (most recent fill first)
-                active_group_triggers = list(reversed(tmp_rows))
+                active_group_triggers = list(reversed(tmp_rows))  # newest-first display
 
             data["active_group"] = active_group
             data["active_group_triggers"] = active_group_triggers
-            data["active_group_last_sell_time"] = (last_sell_ts.isoformat() if last_sell_ts else None)
+            data["active_group_last_flat_time"] = (last_flat_time.isoformat() if hasattr(last_flat_time, "isoformat") else str(last_flat_time) if last_flat_time else None)
 
         except Exception as e:
             data["active_group_error"] = str(e)
@@ -832,7 +843,7 @@ def report():
 
 @app.route("/cycles")
 def cycles():
-    """Closed trade cycles newest-first."""
+    """Closed trade cycles newest-first (only closes when net shares returns to 0)."""
     try:
         cyc = compute_cycles(days=30, symbol="TSLA")
         return jsonify({"ok": True, "cycles": cyc})
@@ -871,7 +882,6 @@ def table_view():
     <style>
       body { font-family: Arial, sans-serif; padding: 16px; }
       .box { padding: 12px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 16px; background: #fff; }
-      .row { margin: 4px 0; }
       .muted { color: #666; }
 
       table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
@@ -880,20 +890,17 @@ def table_view():
       td:first-child, th:first-child { text-align: center; }
       td:nth-child(2), th:nth-child(2) { text-align: left; }
 
-      /* BIG live TSLA price banner */
       .price-wrap { display: flex; justify-content: center; margin-bottom: 12px; }
       .price-box { max-width: 520px; width: 100%; text-align: center; }
       .price-label { font-size: 16px; color: #666; margin-bottom: 4px; }
       .price-banner { font-size: 42px; font-weight: bold; margin-bottom: 4px; }
 
-      /* Small metric box (Potential Profit) */
       .metric-wrap { display: flex; justify-content: center; margin: 0 0 16px; }
       .metric-box { max-width: 520px; width: 100%; text-align: center; }
       .metric-title { font-size: 16px; color: #666; margin-bottom: 6px; }
       .metric-value { font-size: 28px; font-weight: bold; margin-bottom: 4px; }
       .metric-sub { font-size: 14px; color: #666; }
 
-      /* Top row: Account (left) + Summary (right), centered as a pair */
       .top-row {
         display: flex;
         justify-content: center;
@@ -903,7 +910,6 @@ def table_view():
         flex-wrap: wrap;
       }
 
-      /* Two-column rows (shared) */
       .grid-row {
         display: grid;
         grid-template-columns: 1fr auto;
@@ -913,11 +919,9 @@ def table_view():
       .grid-label { text-align: left; }
       .grid-value { text-align: right; font-variant-numeric: tabular-nums; }
 
-      /* Account + Summary widths */
       .acct-grid { max-width: 400px; margin: 0; width: 100%; }
       .summary-grid { max-width: 400px; margin: 0; width: 100%; }
 
-      /* Small section heading inside boxes */
       .box-title { font-weight: bold; margin-bottom: 2px; }
       .box-sub { color: #666; font-size: 13px; margin-bottom: 8px; }
       .section-gap { margin-top: 10px; }
@@ -1262,15 +1266,6 @@ def table_view():
     html.append("</body></html>")
     return Response("\n".join(html), mimetype="text/html")
 
-@app.route("/pushover_status")
-def pushover_status():
-    return jsonify({
-        "ok": True,
-        "watcher": WATCHER_STATUS,
-        "push_enabled": ENABLE_PUSH_ALERTS,
-        "has_user_key": bool(PUSHOVER_USER_KEY),
-        "has_app_token": bool(PUSHOVER_APP_TOKEN)
-    })
 
 # Start the BUY/SELL push watcher when the app loads
 start_fill_watcher()
