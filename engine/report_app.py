@@ -1202,6 +1202,15 @@ def table_view():
     html.append("</body></html>")
     return Response("\n".join(html), mimetype="text/html")
 
+@app.route("/pushover_status")
+def pushover_status():
+    return jsonify({
+        "ok": True,
+        "watcher": WATCHER_STATUS,
+        "push_enabled": ENABLE_PUSH_ALERTS,
+        "has_user_key": bool(PUSHOVER_USER_KEY),
+        "has_app_token": bool(PUSHOVER_APP_TOKEN)
+    })
 
 # Start the BUY/SELL push watcher when the app loads
 start_fill_watcher()
