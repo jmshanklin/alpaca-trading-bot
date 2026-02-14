@@ -749,6 +749,11 @@ def report():
             # Only bot SELL-ALL resets the group. Manual sells are ignored here.
             last_sell_ts = find_last_tsla_bot_sell_time(acts2)
 
+            # strategy settings (hard-coded for now)
+            BUY_QTY = 12
+            SELL_OFFSET = 2.0
+            FIRST_INCREMENT_COUNT = 5
+            
             # filter to TSLA buys AFTER last bot sell-all
             tsla_buys_after = []
             for act in acts2:
@@ -761,8 +766,23 @@ def report():
                 if last_sell_ts and ts <= last_sell_ts:
                     continue
                 tsla_buys_after.append(act)
-
-            group_buys = aggregate_fills_by_order_id(tsla_buys_after, only_symbol="TSLA", only_side="buy")
+            
+            # ✅ IMPORTANT FIX:
+            # Only count "ladder step" buys that match the bot's buy size.
+            # Manual test buys (qty=1) will NOT advance the ladder anymore.
+            ladder_buys_after = []
+            for act in tsla_buys_after:
+                qty_raw = _get_attr(act, "qty") or _get_attr(act, "quantity") or _get_attr(act, "filled_qty")
+                try:
+                    qty = float(qty_raw)
+                except Exception:
+                    qty = None
+                if qty is None:
+                    continue
+                if int(round(qty)) == int(BUY_QTY):
+                    ladder_buys_after.append(act)
+            
+            group_buys = aggregate_fills_by_order_id(ladder_buys_after, only_symbol="TSLA", only_side="buy")
             # group_buys is newest-first
 
             active_group = None
