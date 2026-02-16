@@ -653,7 +653,7 @@ def watcher_debug():
     Shows what the watcher is seeing and how it decides what's "new".
     """
     try:
-        after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
+        after = (datetime.utcnow() - timedelta(days=10)).isoformat() + "Z"
         acts = api.get_activities(activity_types="FILL", after=after)
 
         fills = []
