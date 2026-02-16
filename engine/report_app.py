@@ -132,6 +132,12 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
 
     last_seen_id = state.get("last_seen_id")
     last_seen_time = state.get("last_seen_time")  # ISO string
+    
+    # --- Sync in-memory status from persisted state on startup ---
+    WATCHER_STATUS["initialized"] = bool(initialized)
+    WATCHER_STATUS["last_seen_id"] = last_seen_id
+    WATCHER_STATUS["last_seen_time"] = last_seen_time
+    WATCHER_STATUS["started"] = True
 
     while True:
         try:
