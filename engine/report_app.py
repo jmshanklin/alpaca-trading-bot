@@ -1349,9 +1349,42 @@ def pushover_status():
         }
     )
 
+# -------------------------
+# Watcher singleton (prevents duplicate watchers under gunicorn -w N)
+# -------------------------
+_WATCHER_LOCK_PATH = os.getenv("WATCHER_LOCK_PATH", "/tmp/tsla_fill_watcher.lock")
+
+def _acquire_watcher_lock() -> bool:
+    """
+    Return True only in ONE process.
+    Uses an atomic create to claim the lock.
+    """
+    try:
+        fd = os.open(_WATCHER_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        print("Watcher lock error:", e)
+        # If locking fails for some odd reason, default to NOT starting
+        return False
+
+def start_fill_watcher_singleton():
+    """
+    Starts the watcher only if this process wins the lock.
+    """
+    if _acquire_watcher_lock():
+        print("Watcher lock acquired -> starting fill watcher")
+        start_fill_watcher()
+    else:
+        print("Watcher lock NOT acquired -> watcher will NOT start in this worker")
 
 # Start the BUY/SELL push watcher when the app loads
-start_fill_watcher()
+start_fill_watcher_singleton()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
