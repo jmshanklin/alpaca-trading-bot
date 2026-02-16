@@ -11,6 +11,36 @@ from flask import Flask, Response, jsonify
 
 app = Flask(__name__)
 
+# ---------------------------------------------------------
+# DIAGNOSTIC ROUTE — proves THIS file is running on Render
+# ---------------------------------------------------------
+@app.route("/diag")
+def diag():
+    return jsonify({
+        "ok": True,
+        "service": "alpaca-report",
+        "file": "engine/report_app.py",
+        "time_utc": datetime.utcnow().isoformat() + "Z",
+
+        # watcher state
+        "watcher_started": WATCHER_STATUS.get("started"),
+        "watcher_initialized": WATCHER_STATUS.get("initialized"),
+        "watcher_last_seen_time": WATCHER_STATUS.get("last_seen_time"),
+        "watcher_last_error": WATCHER_STATUS.get("last_error"),
+
+        # push settings
+        "ENABLE_PUSH_ALERTS": ENABLE_PUSH_ALERTS,
+        "has_PUSHOVER_USER_KEY": bool(PUSHOVER_USER_KEY),
+        "has_PUSHOVER_APP_TOKEN": bool(PUSHOVER_APP_TOKEN),
+
+        # bot sell detection config
+        "BOT_SELL_CLIENT_PREFIXES": BOT_SELL_CLIENT_PREFIXES,
+
+        # Alpaca endpoint info
+        "alpaca_base_url": BASE_URL,
+        "alpaca_key_loaded": bool(API_KEY),
+    })
+
 # --- Alpaca connection ---
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
