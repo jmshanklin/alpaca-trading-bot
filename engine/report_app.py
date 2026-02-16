@@ -128,7 +128,7 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
     global WATCHER_STATUS
 
     state = _load_push_state()
-    initialized = state.get("initialized", False)
+    initialized = bool(state.get("initialized", False) or state.get("last_seen_time"))
 
     last_seen_id = state.get("last_seen_id")
     last_seen_time = state.get("last_seen_time")  # ISO string
