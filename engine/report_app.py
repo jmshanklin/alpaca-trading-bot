@@ -2,6 +2,7 @@ import os
 import json
 import time
 import threading
+import atexit
 from datetime import datetime, timedelta
 
 import requests
@@ -1371,6 +1372,53 @@ def _acquire_watcher_lock() -> bool:
     except Exception as e:
         print("Watcher lock error:", e)
         # If locking fails for some odd reason, default to NOT starting
+        return False
+
+def start_fill_watcher_singleton():
+    """
+    Starts the watcher only if this process wins the lock.
+    """
+    if _acquire_watcher_lock():
+        print("Watcher lock acquired -> starting fill watcher")
+        start_fill_watcher()
+    else:
+        print("Watcher lock NOT acquired -> watcher will NOT start in this worker")
+        
+# -------------------------
+# Watcher singleton (prevents duplicate watchers under gunicorn -w N)
+# -------------------------
+_WATCHER_LOCK_PATH = os.getenv("WATCHER_LOCK_PATH", "/tmp/tsla_fill_watcher.lock")
+_WATCHER_LOCKED = False
+
+def _release_watcher_lock():
+    global _WATCHER_LOCKED
+    if not _WATCHER_LOCKED:
+        return
+    try:
+        os.remove(_WATCHER_LOCK_PATH)
+    except Exception:
+        pass
+    _WATCHER_LOCKED = False
+
+def _acquire_watcher_lock() -> bool:
+    """
+    Return True only in ONE process.
+    Uses an atomic create to claim the lock.
+    """
+    global _WATCHER_LOCKED
+    try:
+        fd = os.open(_WATCHER_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        _WATCHER_LOCKED = True
+        atexit.register(_release_watcher_lock)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        print("Watcher lock error:", e)
         return False
 
 def start_fill_watcher_singleton():
