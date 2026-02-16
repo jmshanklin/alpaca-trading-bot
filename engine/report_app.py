@@ -135,7 +135,7 @@ def _watch_fills_and_push(symbol="TSLA", poll_seconds=15):
 
     while True:
         try:
-            after = (datetime.utcnow() - timedelta(days=2)).isoformat() + "Z"
+            after = (datetime.utcnow() - timedelta(days=10)).isoformat() + "Z"
             acts = api.get_activities(activity_types="FILL", after=after)
 
             # Filter to TSLA buy/sell fills
