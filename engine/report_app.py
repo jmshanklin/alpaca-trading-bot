@@ -1385,61 +1385,13 @@ def pushover_status():
             "bot_sell_prefixes": BOT_SELL_CLIENT_PREFIXES,
         }
     )
-
-# -------------------------
-# Watcher singleton (prevents duplicate watchers under gunicorn -w N)
-# -------------------------
-_WATCHER_LOCK_PATH = os.getenv("WATCHER_LOCK_PATH", "/tmp/tsla_fill_watcher.lock")
-_WATCHER_LOCKED = False
-
-def _release_watcher_lock():
-    global _WATCHER_LOCKED
-    if not _WATCHER_LOCKED:
-        return
-    try:
-        os.remove(_WATCHER_LOCK_PATH)
-    except Exception:
-        pass
-    _WATCHER_LOCKED = False
-
-def _acquire_watcher_lock() -> bool:
-    """
-    Return True only in ONE process.
-    Uses an atomic create to claim the lock.
-    """
-    global _WATCHER_LOCKED
-    try:
-        fd = os.open(_WATCHER_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        try:
-            os.write(fd, str(os.getpid()).encode("utf-8"))
-        finally:
-            os.close(fd)
-
-        _WATCHER_LOCKED = True
-        atexit.register(_release_watcher_lock)
-        return True
-
-    except FileExistsError:
-        return False
-    except Exception as e:
-        print("Watcher lock error:", e)
-        return False
-
-def start_fill_watcher_singleton():
-    """
-    Starts the watcher only if this process wins the lock.
-    """
-    if _acquire_watcher_lock():
-        print("Watcher lock acquired -> starting fill watcher")
-        start_fill_watcher()
-    else:
-        print("Watcher lock NOT acquired -> watcher will NOT start in this worker")
-       
+      
 # -------------------------
 # Watcher singleton (prevents duplicate watchers under gunicorn -w N)
 # -------------------------
 _WATCHER_LOCK_PATH = os.getenv("WATCHER_LOCK_PATH", "/tmp/tsla_fill_watcher.lock")
 _WATCHER_LOCK_OWNER = False  # True only in the process that owns the lock
+
 
 def _pid_is_alive(pid: int) -> bool:
     """Linux/Unix: os.kill(pid, 0) checks existence without killing."""
@@ -1454,6 +1406,7 @@ def _pid_is_alive(pid: int) -> bool:
     except Exception:
         return True
 
+
 def _release_watcher_lock():
     """Remove lock file on clean shutdown if we own it."""
     global _WATCHER_LOCK_OWNER
@@ -1466,16 +1419,18 @@ def _release_watcher_lock():
         pass
     except Exception as e:
         print("Watcher lock release error:", e)
+    _WATCHER_LOCK_OWNER = False
+
 
 def _acquire_watcher_lock() -> bool:
     """
     Return True only in ONE process.
     Uses atomic create to claim the lock.
-    If a stale lock exists (PID not alive), remove it and try again.
+    If a stale/bad lock exists, remove it and try again.
     """
     global _WATCHER_LOCK_OWNER
 
-    # If lock exists, see if it's stale
+    # If lock exists, see if it's stale/bad
     if os.path.exists(_WATCHER_LOCK_PATH):
         try:
             with open(_WATCHER_LOCK_PATH, "r", encoding="utf-8") as f:
@@ -1505,7 +1460,7 @@ def _acquire_watcher_lock() -> bool:
         else:
             # lock exists and looks alive -> do not start
             return False
-    
+
     # Try to create lock atomically
     try:
         fd = os.open(_WATCHER_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -1523,6 +1478,18 @@ def _acquire_watcher_lock() -> bool:
     except Exception as e:
         print("Watcher lock error:", e)
         return False
+
+
+def start_fill_watcher_singleton():
+    """
+    Starts the watcher only if this process wins the lock.
+    """
+    if _acquire_watcher_lock():
+        print("Watcher lock acquired -> starting fill watcher")
+        start_fill_watcher()
+    else:
+        print("Watcher lock NOT acquired -> watcher will NOT start in this worker")
+
 
 # Start the BUY/SELL push watcher when the app loads
 start_fill_watcher_singleton()
