@@ -1304,8 +1304,10 @@ def table_view():
     html.append("<table>")
     html.append(
         "<thead><tr>"
-        "<th>#</th><th>Time (CT)</th><th>Shares</th><th>Total $</th><th>Avg Price</th><th>Intended Drop</th><th>Actual Drop</th>"
+        "<th>#</th><th>Time (CT)</th><th>Shares</th><th>Total $</th><th>Trigger Price</th><th>Intended Drop</th><th>Actual Drop (Trigger)</th>"
         "</tr></thead>"
+    )
+
     )
     html.append("<tbody id='ladder-body'></tbody>")
     html.append("</table>")
