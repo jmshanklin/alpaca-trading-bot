@@ -202,7 +202,7 @@ def journal_trade(
     # Normalize to match DB constraint: ('BUY','SELL')
     side_norm = (side or "").strip().upper()
     if side_norm not in ("BUY", "SELL"):
-        logger.warning(f"TRADE_JOURNAL_BAD_SIDE: {side!r}")
+        logger.warning(f"public.TRADE_JOURNAL_BAD_SIDE: {side!r}")
         return
 
     ct_tag = ct_now_str(datetime.now(timezone.utc))
@@ -212,7 +212,7 @@ def journal_trade(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO trade_journal (
+                INSERT INTO public.trade_journal (
                   symbol, side, qty, est_price, order_id, client_order_id,
                   is_dry_run, is_leader,
                   group_id, anchor_price, last_buy_price, buys_in_group,
@@ -241,7 +241,7 @@ def journal_trade(
         except Exception:
             pass
     except Exception as e:
-        logger.warning(f"TRADE_JOURNAL_WRITE_FAILED: {e}")
+        logger.warning(f"public.TRADE_JOURNAL_WRITE_FAILED: {e}")
 
 
 def heartbeat_banner(
