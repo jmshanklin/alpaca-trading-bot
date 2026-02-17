@@ -4,8 +4,14 @@ import time
 import threading
 import atexit
 from datetime import datetime, timedelta
-import psycopg2
-import psycopg2.extras
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PSYCOPG2 = True
+except Exception as e:
+    psycopg2 = None
+    HAS_PSYCOPG2 = False
+    print("psycopg2 not available:", e, flush=True)
 
 import requests
 import alpaca_trade_api as tradeapi
