@@ -941,7 +941,6 @@ def cycles():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-
 @app.route("/table")
 def table_view():
     """
@@ -949,22 +948,14 @@ def table_view():
     - Big TSLA price banner (top)
     - Potential Profit box (Total + Per-share) (updates every 15 seconds)
     - Account + Summary boxes side-by-side (centered as a pair)
-    - Ladder with WAITING row at TOP + newest fills below
-    - Cycles newest-first
+    - Ladder (filled by JS)
+    - Cycles (filled by JS)
     Auto-refresh: fetch /report + /cycles every 15 seconds
     """
-    r = report()
-    if isinstance(r, tuple):
-        resp, _status = r
-        data = resp.get_json() if hasattr(resp, "get_json") else {}
-    else:
-        data = r.get_json() if hasattr(r, "get_json") else {}
 
-    ag = data.get("active_group") or {}
-    rows = data.get("active_group_triggers") or []  # newest-first fills
-    acct = data.get("account") or {}
-    pos = data.get("position") or {}
-    tsla_price = data.get("tsla_price")
+    # IMPORTANT:
+    # /table MUST return fast and MUST NOT call Alpaca.
+    # The browser will fetch /report and /cycles via JS.
 
     html = []
     html.append("<html><head><title>TSLA Ladder</title>")
@@ -1032,9 +1023,7 @@ def table_view():
     html.append("<div class='price-wrap'>")
     html.append("<div class='box price-box'>")
     html.append("<div class='price-label'>TSLA Price</div>")
-    html.append(
-        f"<div class='price-banner'>$<span id='tsla-price'>{money(tsla_price) if tsla_price is not None else ''}</span></div>"
-    )
+    html.append("<div class='price-banner'>$<span id='tsla-price'></span></div>")
     html.append("</div></div>")
 
     # Potential Profit box
@@ -1053,23 +1042,21 @@ def table_view():
     html.append("<div class='box-title'>Account</div>")
     html.append("<div class='box-sub'>Updates every 15 seconds (time-based), independent of trade activity.</div>")
 
-    def acct_row(label, key, fmt="money"):
-        val = acct.get(key)
-        sval = money0(val) if fmt == "money0" else money(val)
+    def acct_row(label, key):
         return (
             "<div class='grid-row'>"
             f"<div class='grid-label'>{label}</div>"
-            f"<div class='grid-value'>$<span id='acct-{key}'>{sval}</span></div>"
+            f"<div class='grid-value'>$<span id='acct-{key}'></span></div>"
             "</div>"
         )
 
     html.append(acct_row("Equity", "equity"))
     html.append(acct_row("Cash", "cash"))
-    html.append(acct_row("Buying Power", "buying_power", fmt="money0"))
-    html.append(acct_row("RegT Buying Power", "regt_buying_power", fmt="money0"))
-    html.append(acct_row("Day Trading Buying Power", "daytrading_buying_power", fmt="money0"))
-    html.append(acct_row("Effective Buying Power", "effective_buying_power", fmt="money0"))
-    html.append(acct_row("Non-Marginable Buying Power", "non_marginable_buying_power", fmt="money0"))
+    html.append(acct_row("Buying Power", "buying_power"))
+    html.append(acct_row("RegT Buying Power", "regt_buying_power"))
+    html.append(acct_row("Day Trading Buying Power", "daytrading_buying_power"))
+    html.append(acct_row("Effective Buying Power", "effective_buying_power"))
+    html.append(acct_row("Non-Marginable Buying Power", "non_marginable_buying_power"))
 
     html.append("<div class='section-gap'></div>")
     html.append(acct_row("Long Market Value", "long_market_value"))
@@ -1082,45 +1069,36 @@ def table_view():
     html.append("<div class='box-title'>Summary</div>")
     html.append("<div class='box-sub'>Bot status + ladder metrics (updates every 15 seconds).</div>")
 
-    def sum_row(label, value, value_id=None, prefix=""):
-        v = value if value is not None else ""
-        if value_id:
-            return (
-                "<div class='grid-row'>"
-                f"<div class='grid-label'>{label}</div>"
-                f"<div class='grid-value'>{prefix}<span id='{value_id}'>{v}</span></div>"
-                "</div>"
-            )
+    def sum_row(label, value_id, prefix=""):
         return (
             "<div class='grid-row'>"
             f"<div class='grid-label'>{label}</div>"
-            f"<div class='grid-value'>{prefix}{v}</div>"
+            f"<div class='grid-value'>{prefix}<span id='{value_id}'></span></div>"
             "</div>"
         )
 
-    html.append(sum_row("Last updated", data.get("server_time_ct", ""), "last-updated"))
+    html.append(sum_row("Last updated", "last-updated"))
     html.append("<div class='section-gap'></div>")
-    html.append(sum_row("Anchor", ag.get("anchor_vwap"), "ag-anchor-vwap"))
-    html.append(sum_row("Anchor time", ag.get("anchor_time"), "ag-anchor-time"))
-    html.append(sum_row("Sell Target", ag.get("sell_target"), "ag-sell-target"))
-    html.append(sum_row("Distance to Sell", ag.get("distance_to_sell"), "ag-distance-sell"))
-    html.append(sum_row("Next Buy", ag.get("next_buy_price"), "ag-next-buy"))
-    html.append(sum_row("Distance to Next Buy", ag.get("distance_to_next_buy"), "ag-distance-next"))
-    html.append(sum_row("Buys", ag.get("buys_count"), "ag-buys"))
-    html.append(sum_row("Drop Increment", ag.get("drop_increment"), "ag-drop-inc"))
+    html.append(sum_row("Anchor", "ag-anchor-vwap"))
+    html.append(sum_row("Anchor time", "ag-anchor-time"))
+    html.append(sum_row("Sell Target", "ag-sell-target"))
+    html.append(sum_row("Distance to Sell", "ag-distance-sell"))
+    html.append(sum_row("Next Buy", "ag-next-buy"))
+    html.append(sum_row("Distance to Next Buy", "ag-distance-next"))
+    html.append(sum_row("Buys", "ag-buys"))
+    html.append(sum_row("Drop Increment", "ag-drop-inc"))
 
-    if pos and isinstance(pos, dict) and pos.get("qty") is not None:
-        html.append("<div class='section-gap'></div>")
-        html.append("<div class='box-title'>TSLA Position</div>")
-        html.append(sum_row("Qty", pos.get("qty"), "pos-qty"))
-        html.append(sum_row("Avg Entry", money(pos.get("avg_entry")), "pos-avg", prefix="$"))
-        html.append(sum_row("Mkt Value", money(pos.get("market_value")), "pos-mv", prefix="$"))
-        html.append(sum_row("uP/L", money(pos.get("unrealized_pl")), "pos-upl", prefix="$"))
+    html.append("<div class='section-gap'></div>")
+    html.append("<div class='box-title'>TSLA Position</div>")
+    html.append(sum_row("Qty", "pos-qty"))
+    html.append(sum_row("Avg Entry", "pos-avg", prefix="$"))
+    html.append(sum_row("Mkt Value", "pos-mv", prefix="$"))
+    html.append(sum_row("uP/L", "pos-upl", prefix="$"))
 
     html.append("</div>")  # end Summary box
     html.append("</div>")  # end top-row
 
-    # Ladder table
+    # Ladder table (JS fills tbody)
     html.append("<h2>Active Group Ladder</h2>")
     html.append("<table>")
     html.append(
@@ -1128,43 +1106,10 @@ def table_view():
         "<th>#</th><th>Time (CT)</th><th>Shares</th><th>Total $</th><th>Avg Price</th><th>Intended Drop</th><th>Actual Drop</th>"
         "</tr></thead>"
     )
-    html.append("<tbody id='ladder-body'>")
+    html.append("<tbody id='ladder-body'></tbody>")
+    html.append("</table>")
 
-    buy_qty = ag.get("buy_qty") or 12
-
-    # WAITING row at TOP
-    if ag and ag.get("next_buy_price") is not None and ag.get("buys_count") is not None:
-        next_trigger = int(ag["buys_count"]) + 1
-        intended_drop_next = ((next_trigger - 1) // 5) + 1
-        html.append(
-            "<tr>"
-            f"<td><b>{next_trigger}</b></td>"
-            f"<td><b>WAITING</b></td>"
-            f"<td>{buy_qty}</td>"
-            f"<td>—</td>"
-            f"<td><b>{ag.get('next_buy_price')}</b></td>"
-            f"<td><b>{intended_drop_next}</b></td>"
-            f"<td>—</td>"
-            "</tr>"
-        )
-
-    # Then newest-first filled rows
-    for row in rows:
-        html.append(
-            "<tr>"
-            f"<td>{row.get('trigger')}</td>"
-            f"<td>{row.get('time')}</td>"
-            f"<td>{row.get('shares')}</td>"
-            f"<td>{row.get('total_dollars')}</td>"
-            f"<td>{row.get('avg_price')}</td>"
-            f"<td>{row.get('intended_drop')}</td>"
-            f"<td>{row.get('actual_drop')}</td>"
-            "</tr>"
-        )
-
-    html.append("</tbody></table>")
-
-    # Cycles table (filled by JS)
+    # Cycles table (JS fills tbody)
     html.append("<h2>Closed Trade Cycles</h2>")
     html.append(
         """
@@ -1187,7 +1132,7 @@ def table_view():
     """
     )
 
-    # JS: refresh
+    # JS: refresh (same logic as before; pulls /report and /cycles)
     html.append(
         """
     <script>
@@ -1242,6 +1187,11 @@ def table_view():
           setText("pos-avg", fmtMoney(pos.avg_entry));
           setText("pos-mv", fmtMoney(pos.market_value));
           setText("pos-upl", fmtMoney(pos.unrealized_pl));
+        } else {
+          setText("pos-qty", "");
+          setText("pos-avg", "");
+          setText("pos-mv", "");
+          setText("pos-upl", "");
         }
 
         // Potential Profit: (Sell Target - Avg Entry) * Qty
@@ -1333,7 +1283,7 @@ def table_view():
         if (!tbody) return;
 
         tbody.innerHTML = "";
-        data.cycles.forEach((c, i) => {
+        (data.cycles || []).forEach((c, i) => {
           const row = document.createElement("tr");
           row.innerHTML = `
             <td>${i + 1}</td>
