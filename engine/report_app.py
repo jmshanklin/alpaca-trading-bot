@@ -4,6 +4,8 @@ import time
 import threading
 import atexit
 from datetime import datetime, timedelta
+import psycopg2
+import psycopg2.extras
 
 import requests
 import alpaca_trade_api as tradeapi
@@ -63,6 +65,18 @@ API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 BASE_URL = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
 api = tradeapi.REST(API_KEY, API_SECRET, BASE_URL, api_version="v2")
+
+# --- Postgres connection (shared with engine) ---
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def db_connect():
+    """
+    Returns a psycopg2 connection or None if DATABASE_URL not set.
+    Render Postgres typically requires sslmode=require.
+    """
+    if not DATABASE_URL:
+        return None
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 # -------------------------
 # PUSHOVER ALERTS
@@ -350,14 +364,20 @@ def money0(x):
         return str(x)
 
 
-# -------------------------
-# Bot sell detection (so manual sells don't reset Active Group)
-# -------------------------
+# -----------------------------------------------
+# ---------Bot sell / buy detection--------------
+# -----------------------------------------------
 # Your bot uses: client_order_id = f"grid-sell-{cfg.symbol}-..."
 # For TSLA that becomes: "grid-sell-TSLA-..."
 BOT_SELL_CLIENT_PREFIXES = [
     p.strip()
     for p in (os.getenv("BOT_SELL_CLIENT_PREFIXES", "grid-sell-TSLA-") or "").split(",")
+    if p.strip()
+]
+
+BOT_BUY_CLIENT_PREFIXES = [
+    p.strip()
+    for p in (os.getenv("BOT_BUY_CLIENT_PREFIXES", "grid-buy-TSLA-") or "").split(",")
     if p.strip()
 ]
 
@@ -389,7 +409,6 @@ def _get_client_order_id_for_order(order_id: str):
     _ORDER_CLIENT_ID_CACHE[order_id] = cid
     return cid
 
-
 def _is_bot_sell_fill(act):
     """
     True only when this SELL fill belongs to the bot's SELL-ALL order,
@@ -410,7 +429,233 @@ def _is_bot_sell_fill(act):
         return False
     except Exception:
         return False
+        
+def _is_bot_buy_fill(act):
+    """
+    True only when this BUY fill belongs to the bot's BUY order,
+    identified by client_order_id prefix.
+    """
+    try:
+        if _get_attr(act, "symbol") != "TSLA":
+            return False
+        if _get_attr(act, "side") != "buy":
+            return False
+        order_id = _get_attr(act, "order_id")
+        cid = _get_client_order_id_for_order(str(order_id)) if order_id else None
+        if not cid:
+            return False
+        for pfx in BOT_BUY_CLIENT_PREFIXES:
+            if cid.startswith(pfx):
+                return True
+        return False
+    except Exception:
+        return False
+        
+def fetch_active_bot_group_from_db(symbol="TSLA"):
+    """
+    Uses public.trade_journal written by engine.py.
+    Returns:
+      group_id (str|None),
+      buys (list of dict) oldest-first with est_price, qty, ts_utc,
+      last_bot_sell_ts (datetime|None)
+    """
+    conn = db_connect()
+    if conn is None:
+        return None, [], None
 
+    buy_prefix_like = f"grid-buy-{symbol}-%"
+    sell_prefix_like = f"grid-sell-{symbol}-%"
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                # pick most recent group that has bot BUYs and is not closed by a later bot SELL
+                cur.execute(
+                    """
+                    WITH last_buy AS (
+                      SELECT group_id, MAX(ts_utc) AS last_buy_ts
+                      FROM trade_journal
+                      WHERE symbol=%s
+                        AND side='BUY'
+                        AND client_order_id LIKE %s
+                      GROUP BY group_id
+                    ),
+                    last_sell AS (
+                      SELECT group_id, MAX(ts_utc) AS last_sell_ts
+                      FROM trade_journal
+                      WHERE symbol=%s
+                        AND side='SELL'
+                        AND client_order_id LIKE %s
+                      GROUP BY group_id
+                    )
+                    SELECT b.group_id, b.last_buy_ts, s.last_sell_ts
+                    FROM last_buy b
+                    LEFT JOIN last_sell s ON s.group_id=b.group_id
+                    WHERE s.last_sell_ts IS NULL OR s.last_sell_ts < b.last_buy_ts
+                    ORDER BY b.last_buy_ts DESC
+                    LIMIT 1;
+                    """,
+                    (symbol, buy_prefix_like, symbol, sell_prefix_like),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None, [], None
+
+                group_id = row["group_id"]
+
+                cur.execute(
+                    """
+                    SELECT ts_utc, qty, est_price, order_id, client_order_id
+                    FROM trade_journal
+                    WHERE symbol=%s
+                      AND group_id=%s
+                      AND side='BUY'
+                      AND client_order_id LIKE %s
+                    ORDER BY ts_utc ASC;
+                    """,
+                    (symbol, group_id, buy_prefix_like),
+                )
+                buys = [dict(r) for r in cur.fetchall()]
+
+                cur.execute(
+                    """
+                    SELECT MAX(ts_utc) AS last_sell_ts
+                    FROM trade_journal
+                    WHERE symbol=%s
+                      AND side='SELL'
+                      AND client_order_id LIKE %s;
+                    """,
+                    (symbol, sell_prefix_like),
+                )
+                last_sell = cur.fetchone()
+                last_sell_ts = last_sell["last_sell_ts"] if last_sell else None
+
+                return group_id, buys, last_sell_ts
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def fetch_active_bot_group_from_db(symbol="TSLA"):
+    """
+    Returns:
+      group_id (str|None),
+      buys (list of dict) oldest-first with est_price, qty, ts_utc,
+      last_bot_sell_ts (datetime|None)
+    """
+    conn = db_connect()
+    if conn is None:
+        return None, [], None
+
+    buy_pfx = "grid-buy-" + symbol + "-"
+    sell_pfx = "grid-sell-" + symbol + "-"
+
+    with conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            # Find the most recent group_id that has a bot BUY and has NOT been closed by a bot SELL
+            cur.execute(
+                """
+                WITH last_buy AS (
+                  SELECT group_id, MAX(ts_utc) AS last_buy_ts
+                  FROM trade_journal
+                  WHERE symbol=%s
+                    AND side='BUY'
+                    AND client_order_id LIKE %s
+                  GROUP BY group_id
+                ),
+                last_sell AS (
+                  SELECT group_id, MAX(ts_utc) AS last_sell_ts
+                  FROM trade_journal
+                  WHERE symbol=%s
+                    AND side='SELL'
+                    AND client_order_id LIKE %s
+                  GROUP BY group_id
+                )
+                SELECT b.group_id, b.last_buy_ts, s.last_sell_ts
+                FROM last_buy b
+                LEFT JOIN last_sell s ON s.group_id=b.group_id
+                WHERE s.last_sell_ts IS NULL OR s.last_sell_ts < b.last_buy_ts
+                ORDER BY b.last_buy_ts DESC
+                LIMIT 1;
+                """,
+                (symbol, buy_pfx + "%", symbol, sell_pfx + "%"),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None, [], None
+
+            group_id = row["group_id"]
+
+            # Get all bot BUY journal rows for this group, oldest-first
+            cur.execute(
+                """
+                SELECT ts_utc, qty, est_price, order_id, client_order_id
+                FROM trade_journal
+                WHERE symbol=%s
+                  AND group_id=%s
+                  AND side='BUY'
+                  AND client_order_id LIKE %s
+                ORDER BY ts_utc ASC;
+                """,
+                (symbol, group_id, buy_pfx + "%"),
+            )
+            buys = [dict(r) for r in cur.fetchall()]
+
+            # Last bot sell time overall (optional; for debugging/labels)
+            cur.execute(
+                """
+                SELECT MAX(ts_utc) AS last_sell_ts
+                FROM trade_journal
+                WHERE symbol=%s
+                  AND side='SELL'
+                  AND client_order_id LIKE %s;
+                """,
+                (symbol, sell_pfx + "%"),
+            )
+            last_sell = cur.fetchone()
+            last_sell_ts = last_sell["last_sell_ts"] if last_sell else None
+
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+    return group_id, buys, last_sell_ts
+    
+def build_ladder_from_journal_buys(buys):
+    """
+    buys: oldest-first journal rows with est_price, qty, ts_utc
+    Returns newest-first ladder rows where "avg_price" is actually trigger price.
+    """
+    tmp = []
+    prev_price = None
+
+    for i, b in enumerate(buys, start=1):
+        p = float(b["est_price"]) if b.get("est_price") is not None else None
+
+        actual_drop = round(prev_price - p, 4) if (prev_price is not None and p is not None) else None
+        intended_drop = ((i - 1) // 5) + 1 if i > 1 else None
+
+        ts = b.get("ts_utc")
+        # ts_utc from psycopg2 is usually a datetime already; fmt_ct_any accepts datetime or iso
+        time_disp = fmt_ct_any(ts) if ts is not None else None
+
+        tmp.append(
+            {
+                "trigger": i,
+                "time": time_disp,
+                "shares": int(b.get("qty") or 0),
+                "avg_price": round(p, 4) if p is not None else None,  # this is TRIGGER price now
+                "total_dollars": round((p * float(b.get("qty") or 0)), 2) if p is not None else None,
+                "actual_drop": actual_drop,
+                "intended_drop": intended_drop,
+                "order_id": b.get("order_id"),
+            }
+        )
+        prev_price = p
+
+    return list(reversed(tmp))  # newest-first for your UI
 
 # -------------------------
 # Aggregation + Cycles
@@ -802,125 +1047,81 @@ def report():
             data["active_group_last_sell_time"] = None
             return jsonify(data)
 
-        # --- Active Group (computed from activities; one-group mode) ---
+        # --- Active Group (from DB journal; trigger-to-trigger truth) ---
         try:
-            after2 = (datetime.utcnow() - timedelta(days=10)).isoformat() + "Z"
-            acts2 = api.get_activities(activity_types="FILL", after=after2)
-
-            # IMPORTANT CHANGE:
-            # Only bot SELL-ALL resets the group. Manual sells are ignored here.
-            last_sell_ts = find_last_tsla_bot_sell_time(acts2)
-
-            # filter to TSLA buys AFTER last bot sell-all
-            tsla_buys_after = []
-            for act in acts2:
-                symbol = _get_attr(act, "symbol")
-                side = _get_attr(act, "side")
-                ts = _get_attr(act, "transaction_time") or _get_attr(act, "time") or _get_attr(act, "timestamp")
-                ts = _normalize_ts(ts)
-                if symbol != "TSLA" or side != "buy" or not ts:
-                    continue
-                if last_sell_ts and ts <= last_sell_ts:
-                    continue
-                tsla_buys_after.append(act)
-
-            group_buys = aggregate_fills_by_order_id(tsla_buys_after, only_symbol="TSLA", only_side="buy")
-            # group_buys is newest-first
-
+            group_id, buys, last_bot_sell_ts = fetch_active_bot_group_from_db("TSLA")
+        
             active_group = None
             active_group_triggers = []
-
-            if group_buys:
-                # Anchor lock: FIRST buy trigger after last bot sell-all (oldest by time)
-                def _row_time(r):
-                    t = r.get("time")
-                    if isinstance(t, str):
-                        return _parse_iso_time(t) or datetime.max
-                    return t or datetime.max
-
-                anchor_row = min(group_buys, key=_row_time)
-                anchor_price = float(anchor_row["vwap"])
-                group_start_time = anchor_row.get("time")
-
-                # strategy settings (hard-coded for now)
+        
+            if buys:
+                # buys is oldest-first journal rows with est_price + qty
+                active_group_triggers = build_ladder_from_journal_buys(buys)  # newest-first for UI
+        
+                # Anchor = FIRST bot buy trigger price in this group
+                anchor_price = float(buys[0]["est_price"]) if buys[0].get("est_price") is not None else None
+                group_start_time = buys[0].get("ts_utc")
+        
+                # Current price from position if available, else fallback
+                current_price = None
+                if position_data and position_data.get("current_price") is not None:
+                    current_price = float(position_data["current_price"])
+                elif tsla_price is not None:
+                    current_price = float(tsla_price)
+        
+                # Strategy settings (keep these aligned with engine env if/when you want)
                 BUY_QTY = 12
                 SELL_OFFSET = 2.0
                 FIRST_INCREMENT_COUNT = 5
-
-                buys_count = len(group_buys)
+        
+                buys_count = len(buys)
+        
+                # Stage math (your existing scheme)
                 stage = (buys_count - 1) // FIRST_INCREMENT_COUNT + 1
                 drop_increment = float(stage)
                 buys_in_this_stage = (buys_count - 1) % FIRST_INCREMENT_COUNT + 1
-
-                # compute next buy price
+        
+                # Compute next buy price (same logic you had, but based on anchor trigger price)
                 completed_drops = 0.0
                 full_stages = (buys_count - 1) // FIRST_INCREMENT_COUNT
                 for s in range(1, full_stages + 1):
                     completed_drops += s * FIRST_INCREMENT_COUNT
                 partial = (buys_count - 1) % FIRST_INCREMENT_COUNT
                 completed_drops += stage * partial
-                next_buy_price = anchor_price - (completed_drops + stage)
-
-                current_price = None
-                if position_data and position_data.get("current_price") is not None:
-                    current_price = float(position_data["current_price"])
-                elif tsla_price is not None:
-                    current_price = float(tsla_price)
-
-                sell_target = anchor_price + SELL_OFFSET
-
+                next_buy_price = (anchor_price - (completed_drops + stage)) if anchor_price is not None else None
+        
+                sell_target = (anchor_price + SELL_OFFSET) if anchor_price is not None else None
+        
                 distance_to_sell = None
                 distance_to_next_buy = None
-                if current_price is not None:
+                if current_price is not None and sell_target is not None:
                     distance_to_sell = round(sell_target - current_price, 4)
+                if current_price is not None and next_buy_price is not None:
                     distance_to_next_buy = round(current_price - next_buy_price, 4)
-
+        
+                # Keep the same keys your UI expects
                 active_group = {
                     "group_start_time": fmt_ct_any(group_start_time),
-                    "anchor_vwap": round(anchor_price, 4),
-                    "sell_target": round(sell_target, 4),
+                    "anchor_vwap": round(anchor_price, 4) if anchor_price is not None else None,  # now anchor TRIGGER price
+                    "sell_target": round(sell_target, 4) if sell_target is not None else None,
                     "buys_count": buys_count,
                     "drop_increment": drop_increment,
                     "buys_in_this_increment": buys_in_this_stage,
-                    "next_buy_price": round(next_buy_price, 4),
+                    "next_buy_price": round(next_buy_price, 4) if next_buy_price is not None else None,
                     "current_price": round(current_price, 4) if current_price is not None else None,
                     "distance_to_sell": distance_to_sell,
                     "distance_to_next_buy": distance_to_next_buy,
-                    "anchor_time": fmt_ct_any(anchor_row.get("time")),
-                    "anchor_order_id": anchor_row.get("order_id"),
+                    "anchor_time": fmt_ct_any(group_start_time),
+                    "anchor_order_id": buys[0].get("order_id"),
                     "buy_qty": BUY_QTY,
                 }
-
-                # Build chronological first (oldest-first) so actual_drop is correct.
-                ladder_oldest_first = list(reversed(group_buys))  # oldest-first
-                prev_vwap = None
-                tmp_rows = []
-                for i, row in enumerate(ladder_oldest_first, start=1):
-                    vwap = float(row["vwap"])
-                    intended_drop = ((i - 1) // 5) + 1 if i > 1 else None
-                    actual_drop = round(prev_vwap - vwap, 4) if prev_vwap is not None else None
-
-                    tmp_rows.append(
-                        {
-                            "trigger": i,
-                            "time": fmt_ct_any(row.get("time")),
-                            "shares": row.get("filled_qty"),
-                            "avg_price": round(vwap, 4),
-                            "total_dollars": row.get("total_dollars"),
-                            "actual_drop": actual_drop,
-                            "intended_drop": intended_drop,
-                            "order_id": row.get("order_id"),
-                        }
-                    )
-                    prev_vwap = vwap
-
-                # Display newest-first (most recent fill first)
-                active_group_triggers = list(reversed(tmp_rows))
-
+        
             data["active_group"] = active_group
             data["active_group_triggers"] = active_group_triggers
-            data["active_group_last_sell_time"] = (last_sell_ts.isoformat() if last_sell_ts else None)
-
+            data["active_group_last_sell_time"] = (
+                last_bot_sell_ts.isoformat() if last_bot_sell_ts else None
+            )
+        
         except Exception as e:
             data["active_group_error"] = str(e)
             data["active_group"] = None
