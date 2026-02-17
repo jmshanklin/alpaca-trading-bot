@@ -1439,48 +1439,82 @@ def start_fill_watcher_singleton():
 # Watcher singleton (prevents duplicate watchers under gunicorn -w N)
 # -------------------------
 _WATCHER_LOCK_PATH = os.getenv("WATCHER_LOCK_PATH", "/tmp/tsla_fill_watcher.lock")
-_WATCHER_LOCKED = False
+_WATCHER_LOCK_OWNER = False  # True only in the process that owns the lock
+
+def _pid_is_alive(pid: int) -> bool:
+    """Linux/Unix: os.kill(pid, 0) checks existence without killing."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # If we can't check it, assume alive to avoid starting duplicates
+        return True
+    except Exception:
+        return True
 
 def _release_watcher_lock():
-    global _WATCHER_LOCKED
-    if not _WATCHER_LOCKED:
+    """Remove lock file on clean shutdown if we own it."""
+    global _WATCHER_LOCK_OWNER
+    if not _WATCHER_LOCK_OWNER:
         return
     try:
         os.remove(_WATCHER_LOCK_PATH)
-    except Exception:
+        print("Watcher lock released")
+    except FileNotFoundError:
         pass
-    _WATCHER_LOCKED = False
+    except Exception as e:
+        print("Watcher lock release error:", e)
 
 def _acquire_watcher_lock() -> bool:
     """
     Return True only in ONE process.
-    Uses an atomic create to claim the lock.
+    Uses atomic create to claim the lock.
+    If a stale lock exists (PID not alive), remove it and try again.
     """
-    global _WATCHER_LOCKED
+    global _WATCHER_LOCK_OWNER
+
+    # If lock exists, see if it's stale
+    if os.path.exists(_WATCHER_LOCK_PATH):
+        try:
+            with open(_WATCHER_LOCK_PATH, "r", encoding="utf-8") as f:
+                s = (f.read() or "").strip()
+            old_pid = int(s) if s.isdigit() else None
+        except Exception:
+            old_pid = None
+
+        if old_pid is not None and (not _pid_is_alive(old_pid)):
+            # stale lock -> remove it
+            try:
+                os.remove(_WATCHER_LOCK_PATH)
+                print(f"Stale watcher lock removed (old pid {old_pid})")
+            except Exception as e:
+                print("Failed removing stale watcher lock:", e)
+                return False
+        else:
+            # lock exists and looks alive -> do not start
+            return False
+
+    # Try to create lock atomically
     try:
         fd = os.open(_WATCHER_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         try:
             os.write(fd, str(os.getpid()).encode("utf-8"))
         finally:
             os.close(fd)
-        _WATCHER_LOCKED = True
-        atexit.register(_release_watcher_lock)
+
+        _WATCHER_LOCK_OWNER = True
         return True
+
     except FileExistsError:
         return False
     except Exception as e:
         print("Watcher lock error:", e)
         return False
 
-def start_fill_watcher_singleton():
-    """
-    Starts the watcher only if this process wins the lock.
-    """
-    if _acquire_watcher_lock():
-        print("Watcher lock acquired -> starting fill watcher")
-        start_fill_watcher()
-    else:
-        print("Watcher lock NOT acquired -> watcher will NOT start in this worker")
+# Clean up lock on normal exit
+atexit.register(_release_watcher_lock)
 
 # Start the BUY/SELL push watcher when the app loads
 start_fill_watcher_singleton()
