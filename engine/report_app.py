@@ -41,6 +41,13 @@ def diag():
         "alpaca_base_url": BASE_URL,
         "alpaca_key_loaded": bool(API_KEY),
     })
+    
+@app.route("/pid")
+def pid():
+    return jsonify({
+        "ok": True,
+        "pid": os.getpid(),
+    })
 
 # --- Alpaca connection ---
 API_KEY = os.getenv("APCA_API_KEY_ID")
