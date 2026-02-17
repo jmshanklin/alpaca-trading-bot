@@ -58,7 +58,7 @@ def gunicorn_info():
         "GUNICORN_CMD_ARGS": os.getenv("GUNICORN_CMD_ARGS"),
     })
 
-# --- Alpaca connection ---
+# --- Alpaca connection -------------
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 BASE_URL = os.getenv("APCA_API_BASE_URL", "https://paper-api.alpaca.markets")
