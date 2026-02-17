@@ -49,6 +49,15 @@ def pid():
         "pid": os.getpid(),
     })
 
+@app.route("/gunicorn")
+def gunicorn_info():
+    return jsonify({
+        "ok": True,
+        "pid": os.getpid(),
+        "WEB_CONCURRENCY": os.getenv("WEB_CONCURRENCY"),
+        "GUNICORN_CMD_ARGS": os.getenv("GUNICORN_CMD_ARGS"),
+    })
+
 # --- Alpaca connection ---
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
