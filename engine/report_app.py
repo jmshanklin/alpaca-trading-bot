@@ -1354,15 +1354,14 @@ def table_view():
 @app.route("/pushover_status")
 def pushover_status():
     state = _load_push_state()
-    initialized = bool(state.get("initialized") or state.get("last_seen_time"))
     return jsonify(
         {
             "ok": True,
             "watcher": {
-                "initialized": initialized,
-                "last_seen_time": state.get("last_seen_time"),
+                **WATCHER_STATUS,
+                "initialized": bool(state.get("initialized", False) or state.get("last_seen_time")),
                 "last_seen_id": state.get("last_seen_id"),
-                "last_error": WATCHER_STATUS.get("last_error"),
+                "last_seen_time": state.get("last_seen_time"),
             },
             "push_enabled": ENABLE_PUSH_ALERTS,
             "has_user_key": bool(PUSHOVER_USER_KEY),
