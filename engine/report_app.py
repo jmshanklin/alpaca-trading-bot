@@ -1314,7 +1314,6 @@ def table_view():
         "</tr></thead>"
     )
 
-    )
     html.append("<tbody id='ladder-body'></tbody>")
     html.append("</table>")
 
