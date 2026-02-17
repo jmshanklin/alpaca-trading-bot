@@ -83,6 +83,17 @@ def db_connect():
     if not DATABASE_URL:
         return None
     return psycopg2.connect(DATABASE_URL, sslmode="require")
+    
+def db_connect():
+    if (not HAS_PSYCOPG2) or (not DATABASE_URL):
+        return None
+
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+
+    # ✅ Force unqualified table names like "trade_journal" to resolve to public.trade_journal
+    with conn.cursor() as cur:
+        cur.execute("SET search_path TO public;")
+    return conn
 
 # -------------------------
 # PUSHOVER ALERTS
