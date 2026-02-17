@@ -1484,7 +1484,16 @@ def _acquire_watcher_lock() -> bool:
         except Exception:
             old_pid = None
 
-        if old_pid is not None and (not _pid_is_alive(old_pid)):
+        if old_pid is None:
+            # unreadable/garbage lock -> treat as stale
+            try:
+                os.remove(_WATCHER_LOCK_PATH)
+                print("Bad watcher lock removed (unreadable pid)")
+            except Exception as e:
+                print("Failed removing bad watcher lock:", e)
+                return False
+
+        elif not _pid_is_alive(old_pid):
             # stale lock -> remove it
             try:
                 os.remove(_WATCHER_LOCK_PATH)
@@ -1492,10 +1501,11 @@ def _acquire_watcher_lock() -> bool:
             except Exception as e:
                 print("Failed removing stale watcher lock:", e)
                 return False
+
         else:
             # lock exists and looks alive -> do not start
             return False
-
+    
     # Try to create lock atomically
     try:
         fd = os.open(_WATCHER_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -1505,6 +1515,7 @@ def _acquire_watcher_lock() -> bool:
             os.close(fd)
 
         _WATCHER_LOCK_OWNER = True
+        atexit.register(_release_watcher_lock)
         return True
 
     except FileExistsError:
@@ -1512,9 +1523,6 @@ def _acquire_watcher_lock() -> bool:
     except Exception as e:
         print("Watcher lock error:", e)
         return False
-
-# Clean up lock on normal exit
-atexit.register(_release_watcher_lock)
 
 # Start the BUY/SELL push watcher when the app loads
 start_fill_watcher_singleton()
