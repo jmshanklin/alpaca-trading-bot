@@ -1651,7 +1651,10 @@ def start_fill_watcher_singleton():
 
 
 # Start the BUY/SELL push watcher when the app loads
-start_fill_watcher_singleton()
+if os.getenv("START_WATCHER_ON_BOOT", "0") == "1":
+    start_fill_watcher_singleton()
+else:
+    print("Watcher NOT started (START_WATCHER_ON_BOOT != 1).", flush=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
