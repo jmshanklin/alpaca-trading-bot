@@ -646,11 +646,20 @@ def push_test():
     send_push("TSLA BOT TEST 🚀", "If you see this, push alerts work!")
     return jsonify({"ok": True, "message": "sent"})
 
-
 @app.route("/watcher_status")
 def watcher_status():
-    return jsonify({"ok": True, "watcher": WATCHER_STATUS})
-
+    state = _load_push_state()
+    initialized = bool(state.get("initialized") or state.get("last_seen_time"))
+    return jsonify({
+        "ok": True,
+        "watcher": {
+            "started": True,  # means the service is up; watcher may be in another worker
+            "initialized": initialized,
+            "last_seen_time": state.get("last_seen_time"),
+            "last_seen_id": state.get("last_seen_id"),
+            "last_error": WATCHER_STATUS.get("last_error"),
+        }
+    })
 
 @app.route("/watcher_debug")
 def watcher_debug():
@@ -1342,13 +1351,19 @@ def table_view():
     html.append("</body></html>")
     return Response("\n".join(html), mimetype="text/html")
 
-
 @app.route("/pushover_status")
 def pushover_status():
+    state = _load_push_state()
+    initialized = bool(state.get("initialized") or state.get("last_seen_time"))
     return jsonify(
         {
             "ok": True,
-            "watcher": WATCHER_STATUS,
+            "watcher": {
+                "initialized": initialized,
+                "last_seen_time": state.get("last_seen_time"),
+                "last_seen_id": state.get("last_seen_id"),
+                "last_error": WATCHER_STATUS.get("last_error"),
+            },
             "push_enabled": ENABLE_PUSH_ALERTS,
             "has_user_key": bool(PUSHOVER_USER_KEY),
             "has_app_token": bool(PUSHOVER_APP_TOKEN),
