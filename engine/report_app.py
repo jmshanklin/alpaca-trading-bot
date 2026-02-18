@@ -183,6 +183,69 @@ def diag():
         }
     )
 
+@app.route("/db_diag")
+def db_diag():
+    info = {
+        "ok": True,
+        "HAS_PSYCOPG2": HAS_PSYCOPG2,
+        "has_DATABASE_URL": bool(DATABASE_URL),
+    }
+
+    if not HAS_PSYCOPG2 or not DATABASE_URL:
+        info["error"] = "psycopg2 missing or DATABASE_URL not set"
+        return jsonify(info), 500
+
+    try:
+        conn = db_connect()
+        if conn is None:
+            info["error"] = "db_connect() returned None"
+            return jsonify(info), 500
+
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_database();")
+                info["current_database"] = cur.fetchone()[0]
+
+                cur.execute("SELECT current_user;")
+                info["current_user"] = cur.fetchone()[0]
+
+                cur.execute("SHOW search_path;")
+                info["search_path"] = cur.fetchone()[0]
+
+                # List tables in public
+                cur.execute(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema='public'
+                    ORDER BY table_name;
+                    """
+                )
+                info["public_tables"] = [r[0] for r in cur.fetchall()]
+
+                # specifically check for trade_journal
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                      SELECT 1
+                      FROM information_schema.tables
+                      WHERE table_schema='public'
+                        AND table_name='trade_journal'
+                    );
+                    """
+                )
+                info["public_trade_journal_exists"] = bool(cur.fetchone()[0])
+
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+        return jsonify(info)
+
+    except Exception as e:
+        info["error"] = str(e)
+        return jsonify(info), 500
 
 @app.route("/pid")
 def pid():
