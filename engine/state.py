@@ -21,12 +21,16 @@ def db_connect(database_url: str):
     conn.autocommit = True
     return conn
 
-
 def db_init(conn) -> None:
     with conn.cursor() as cur:
+        # Always make sure public exists and we write/read there
+        cur.execute("CREATE SCHEMA IF NOT EXISTS public;")
+        cur.execute("SET search_path TO public;")
+
+        # Existing table
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS engine_state (
+            CREATE TABLE IF NOT EXISTS public.engine_state (
                 id TEXT PRIMARY KEY,
                 state JSONB NOT NULL DEFAULT '{}'::jsonb,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -34,6 +38,40 @@ def db_init(conn) -> None:
             """
         )
 
+        # NEW: trade_journal (the ladder truth source)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS public.trade_journal (
+                id BIGSERIAL PRIMARY KEY,
+                ts_utc TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
+                qty INTEGER NOT NULL CHECK (qty > 0),
+                est_price DOUBLE PRECISION,
+
+                order_id TEXT,
+                client_order_id TEXT,
+
+                is_dry_run BOOLEAN NOT NULL DEFAULT true,
+                is_leader BOOLEAN NOT NULL DEFAULT false,
+
+                group_id TEXT,
+                anchor_price DOUBLE PRECISION,
+                last_buy_price DOUBLE PRECISION,
+                buys_in_group INTEGER,
+
+                note TEXT
+            );
+            """
+        )
+
+        # Indexes that make your report queries fast
+        cur.execute("CREATE INDEX IF NOT EXISTS trade_journal_ts_idx ON public.trade_journal (ts_utc DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS trade_journal_symbol_ts_idx ON public.trade_journal (symbol, ts_utc DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS trade_journal_group_ts_idx ON public.trade_journal (group_id, ts_utc ASC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS trade_journal_client_id_idx ON public.trade_journal (client_order_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS trade_journal_order_id_idx ON public.trade_journal (order_id);")
 
 # ----------------------------
 # Leader Lock (Postgres advisory lock)
