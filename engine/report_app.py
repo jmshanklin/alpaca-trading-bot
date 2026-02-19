@@ -934,7 +934,6 @@ def pushover_status():
         }
     )
 
-
 @app.route("/report")
 def report():
     """
@@ -1011,45 +1010,57 @@ def report():
                 elif tsla_price is not None:
                     current_price = float(tsla_price)
 
-                # Strategy settings (display only)
+                # Strategy settings (match engine defaults unless you later move these to env vars)
                 BUY_QTY = 12
                 SELL_OFFSET = 2.0
-                FIRST_INCREMENT_COUNT = 5
 
-                buys_count = len(buys)
-                stage = (buys_count - 1) // FIRST_INCREMENT_COUNT + 1
-                drop_increment = float(stage)
-                buys_in_this_stage = (buys_count - 1) % FIRST_INCREMENT_COUNT + 1
+                # Engine grid math knobs (must match engine/config.py)
+                TIER_SIZE = 5
+                STEP_START = 1.0
+                STEP_INCREMENT = 1.0
 
-                # next buy math (same scheme, based on anchor trigger price)
-                completed_drops = 0.0
-                full_stages = (buys_count - 1) // FIRST_INCREMENT_COUNT
-                for s in range(1, full_stages + 1):
-                    completed_drops += s * FIRST_INCREMENT_COUNT
-                partial = (buys_count - 1) % FIRST_INCREMENT_COUNT
-                completed_drops += stage * partial
+                buys_count = len(buys)  # bot buys in this group (same meaning as gs.buy_count_in_group)
 
-                next_buy_price = (anchor_price - (completed_drops + stage)) if anchor_price is not None else None
+                # --- Engine-equivalent step_now ---
+                # When buys_count = 0..4 -> 1.00
+                # When buys_count = 5..9 -> 2.00
+                # etc.
+                step_now = float(STEP_START + STEP_INCREMENT * (buys_count // TIER_SIZE))
+
+                # Last bot trigger price from the journal (this matches what engine used when it decided to buy)
+                last_trigger_price = None
+                if buys and buys[-1].get("est_price") is not None:
+                    last_trigger_price = float(buys[-1]["est_price"])
+
+                # --- Engine-equivalent next buy trigger ---
+                # Engine triggers off the last buy price, NOT the original anchor.
+                next_buy_price_engine = (
+                    (last_trigger_price - step_now) if last_trigger_price is not None else None
+                )
+
                 sell_target = (anchor_price + SELL_OFFSET) if anchor_price is not None else None
 
                 distance_to_sell = None
-                distance_to_next_buy = None
+                distance_to_next_buy_engine = None
                 if current_price is not None and sell_target is not None:
                     distance_to_sell = round(sell_target - current_price, 4)
-                if current_price is not None and next_buy_price is not None:
-                    distance_to_next_buy = round(current_price - next_buy_price, 4)
+                if current_price is not None and next_buy_price_engine is not None:
+                    distance_to_next_buy_engine = round(current_price - next_buy_price_engine, 4)
+
+                # Optional: show "buys_in_this_increment" (handy for UI/debug; matches engine idea)
+                buys_in_this_increment = (buys_count % TIER_SIZE) if buys_count is not None else None
 
                 active_group = {
                     "group_start_time": fmt_ct_any(group_start_time),
                     "anchor_vwap": round(anchor_price, 4) if anchor_price is not None else None,
                     "sell_target": round(sell_target, 4) if sell_target is not None else None,
                     "buys_count": buys_count,
-                    "drop_increment": drop_increment,
-                    "buys_in_this_increment": buys_in_this_stage,
-                    "next_buy_price": round(next_buy_price, 4) if next_buy_price is not None else None,
+                    "drop_increment": step_now,
+                    "buys_in_this_increment": buys_in_this_increment,
+                    "next_buy_price": round(next_buy_price_engine, 4) if next_buy_price_engine is not None else None,
                     "current_price": round(current_price, 4) if current_price is not None else None,
                     "distance_to_sell": distance_to_sell,
-                    "distance_to_next_buy": distance_to_next_buy,
+                    "distance_to_next_buy": distance_to_next_buy_engine,
                     "anchor_time": fmt_ct_any(group_start_time),
                     "anchor_order_id": buys[0].get("order_id"),
                     "buy_qty": BUY_QTY,
@@ -1069,7 +1080,6 @@ def report():
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-
 
 @app.route("/cycles")
 def cycles():
