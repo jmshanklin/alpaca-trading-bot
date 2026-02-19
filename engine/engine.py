@@ -532,6 +532,17 @@ def main():
             buys_this_tick = 0
 
             while (not cfg.kill_switch) and buys_this_tick < cfg.max_buys_per_tick:
+                step_now_dbg = current_step_usd(
+                    step_start=cfg.grid_step_start_usd,
+                    step_increment=cfg.grid_step_increment_usd,
+                    tier_size=cfg.grid_tier_size,
+                    buy_count_in_group=gs.buy_count_in_group,
+                )
+                next_buy_dbg = (gs.last_buy_price - step_now_dbg) if gs.last_buy_price is not None else None
+                logger.info(
+                    f"BUY_CHECK price={price:.2f} last_buy={gs.last_buy_price} step={step_now_dbg:.2f} next_buy={next_buy_dbg}"
+                )
+
                 # Grid gate
                 if not should_buy_now(
                     price=price,
