@@ -78,4 +78,5 @@ def should_sell_now(*, price: float, gs: GridState, sell_rise_usd: float) -> boo
 def reset_group(gs: GridState) -> None:
     gs.anchor_price = None
     gs.last_buy_price = None
+    gs.last_trigger_price = None
     gs.buy_count_in_group = 0
