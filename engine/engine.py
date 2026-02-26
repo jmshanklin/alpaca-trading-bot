@@ -8,6 +8,7 @@ import uuid
 import alpaca_trade_api as tradeapi
 
 from logging_ct import build_logger
+
 # ---- logger must exist before main() runs ----
 logger = build_logger("engine")
 
@@ -31,11 +32,6 @@ from state import (
     load_state_disk,
     save_state_disk,
 )
-
-# ----------------------------
-# Logger must exist BEFORE any logger.* calls
-# ----------------------------
-logger = build_logger("engine")
 
 # ----------------------------
 # Boot signature (prints immediately even if logger breaks later)
@@ -62,6 +58,7 @@ def ct_now_str(now_utc: Optional[datetime] = None) -> str:
         # Fallback if ZoneInfo missing for any reason
         return now_utc.strftime("%Y-%m-%d %I:%M:%S %p UTC")
 
+
 def et_date_str(now_utc: datetime) -> str:
     """
     ET rollover key for "buys_today".
@@ -73,14 +70,16 @@ def et_date_str(now_utc: datetime) -> str:
     except Exception:
         return now_utc.date().isoformat()
 
+
 # ----------------------------
-#          Helpers
+# Helpers
 # ----------------------------
 def is_live_endpoint(url: str) -> bool:
     u = (url or "").lower()
     if "paper-api" in u:
         return False
     return "api.alpaca.markets" in u
+
 
 def get_position_details(
     api: tradeapi.REST, symbol: str
@@ -109,6 +108,7 @@ def get_position_details(
             return 0, None, None, None, True  # flat is a valid state
         logger.warning(f"GET_POSITION_FAILED: {e}")
         return None, None, None, None, False
+
 
 def submit_market_buy(api: tradeapi.REST, symbol: str, qty: int, client_order_id: str):
     return api.submit_order(
@@ -199,7 +199,6 @@ def journal_trade(
     if conn is None:
         return
 
-    # Normalize to match DB constraint: ('BUY','SELL')
     side_norm = (side or "").strip().upper()
     if side_norm not in ("BUY", "SELL"):
         logger.warning(f"public.TRADE_JOURNAL_BAD_SIDE: {side!r}")
@@ -282,8 +281,8 @@ def heartbeat_banner(
     logger.warning("----------------------------------------------")
     logger.warning("GRID STATE")
     logger.warning(f"ANCHOR:      {fmt_num(gs.anchor_price)}")
-    logger.warning(f"LAST_BUY:    {fmt_num(gs.last_buy_price)}")
     logger.warning(f"LAST_TRIG:   {fmt_num(gs.last_trigger_price)}")
+    logger.warning(f"LAST_BUY:    {fmt_num(gs.last_buy_price)}")
     logger.warning(f"BUYS_IN_GRP: {gs.buy_count_in_group}")
     logger.warning(
         f"STEP_NOW:    {fmt_num(step_now)}  (start={cfg.grid_step_start_usd} "
@@ -377,12 +376,24 @@ def main():
         else:
             save_state_disk(cfg.state_path, state)
 
-    # Grid state
+    # Grid state (trigger-based ladder)
     gs = GridState(
         anchor_price=state.get("grid_anchor_price"),
-        last_buy_price=state.get("grid_last_buy_price") or state.get("grid_last_trigger"),  # legacy fallback
-        buy_count_in_group=int(state.get("grid_buy_count_in_group", 0) or state.get("grid_tier_buys_used", 0) or 0),
-        last_trigger_price=state.get("grid_last_trigger_price") or state.get("grid_last_buy_price"),
+        last_buy_price=(
+            state.get("grid_last_buy_price")
+            or state.get("grid_last_trigger_price")
+            or state.get("grid_last_trigger")  # last-resort legacy
+        ),
+        last_trigger_price=(
+            state.get("grid_last_trigger_price")
+            or state.get("grid_last_buy_price")
+            or state.get("grid_last_trigger")  # last-resort legacy
+        ),
+        buy_count_in_group=int(
+            state.get("grid_buy_count_in_group", 0)
+            or state.get("grid_tier_buys_used", 0)  # legacy
+            or 0
+        ),
     )
 
     logger.warning("")
@@ -399,6 +410,7 @@ def main():
         f"GRID:          start={cfg.grid_step_start_usd} inc={cfg.grid_step_increment_usd} "
         f"tier={cfg.grid_tier_size} sell_rise={cfg.sell_rise_usd}"
     )
+    logger.warning(f"POLL_SEC:      {poll_sec}")
     logger.warning(f"HEARTBEAT_SEC: {heartbeat_sec}")
     logger.warning("==============================================")
     logger.warning("")
@@ -447,7 +459,10 @@ def main():
 
             # If Alpaca is flat, grid memory should be empty
             if pos_qty <= 0 and (
-                gs.anchor_price is not None or gs.last_buy_price is not None or gs.buy_count_in_group > 0
+                gs.anchor_price is not None
+                or gs.last_buy_price is not None
+                or gs.last_trigger_price is not None
+                or gs.buy_count_in_group > 0
             ):
                 reset_group(gs)
                 group_id = str(uuid.uuid4())
@@ -540,12 +555,17 @@ def main():
                     tier_size=cfg.grid_tier_size,
                     buy_count_in_group=gs.buy_count_in_group,
                 )
-                next_buy_dbg = (gs.last_buy_price - step_now_dbg) if gs.last_buy_price is not None else None
+                next_buy_dbg = (
+                    (float(gs.last_trigger_price) - float(step_now_dbg))
+                    if gs.last_trigger_price is not None
+                    else None
+                )
                 logger.info(
-                    f"BUY_CHECK price={price:.2f} last_buy={gs.last_buy_price} step={step_now_dbg:.2f} next_buy={next_buy_dbg}"
+                    f"BUY_CHECK price={price:.2f} last_trig={gs.last_trigger_price} last_buy={gs.last_buy_price} "
+                    f"step={step_now_dbg:.2f} next_buy={next_buy_dbg}"
                 )
 
-                # Grid gate
+                # Grid gate (grid.py should be trigger-based now)
                 if not should_buy_now(
                     price=price,
                     gs=gs,
@@ -574,7 +594,6 @@ def main():
 
                 if not decision.ok:
                     logger.info(f"BUY_BLOCKED reason={decision.reason}")
-
                     journal_trade(
                         conn=conn,
                         symbol=cfg.symbol,
@@ -637,7 +656,6 @@ def main():
                         step_increment=cfg.grid_step_increment_usd,
                         tier_size=cfg.grid_tier_size,
                     )
-                    
                 else:
                     order = submit_market_buy(api, cfg.symbol, cfg.order_qty, client_order_id=client_order_id)
                     journal_trade(
@@ -668,7 +686,7 @@ def main():
             state["buys_today_date_et"] = buys_today_date
             state["group_id"] = group_id
 
-            # Grid persistence keys
+            # Grid persistence keys (new)
             state["grid_anchor_price"] = gs.anchor_price
             state["grid_last_buy_price"] = gs.last_buy_price
             state["grid_buy_count_in_group"] = int(gs.buy_count_in_group)
