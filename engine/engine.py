@@ -628,8 +628,14 @@ def main():
                         client_order_id=client_order_id,
                         note="DRY_RUN buy",
                     )
-                    on_buy_filled(fill_price=price, gs=gs)
-                    pos_qty = int(pos_qty) + int(cfg.order_qty)
+                    on_buy_filled(
+                        fill_price=price,
+                        gs=gs,
+                        step_start=cfg.grid_step_start_usd,
+                        step_increment=cfg.grid_step_increment_usd,
+                        tier_size=cfg.grid_tier_size,
+                    )
+                    
                 else:
                     order = submit_market_buy(api, cfg.symbol, cfg.order_qty, client_order_id=client_order_id)
                     journal_trade(
@@ -646,8 +652,13 @@ def main():
                         client_order_id=client_order_id,
                         note="ORDER_SUBMITTED buy",
                     )
-                    on_buy_filled(fill_price=price, gs=gs)
-                    pos_qty = int(pos_qty) + int(cfg.order_qty)
+                    on_buy_filled(
+                        fill_price=price,
+                        gs=gs,
+                        step_start=cfg.grid_step_start_usd,
+                        step_increment=cfg.grid_step_increment_usd,
+                        tier_size=cfg.grid_tier_size,
+                    )
 
             # --- Persist state ---
             state["buy_count_total"] = int(buy_count_total)
