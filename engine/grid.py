@@ -6,7 +6,13 @@ from typing import Optional
 class GridState:
     # anchor = first buy price of the current group
     anchor_price: Optional[float] = None
+
+    # last executed buy fill (what Alpaca actually filled at)
     last_buy_price: Optional[float] = None
+
+    # last grid rung/trigger reference (what the grid steps from)
+    last_trigger_price: Optional[float] = None
+
     buy_count_in_group: int = 0
 
 def current_step_usd(*, step_start: float, step_increment: float, tier_size: int, buy_count_in_group: int) -> float:
