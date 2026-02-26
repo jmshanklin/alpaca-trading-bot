@@ -283,6 +283,7 @@ def heartbeat_banner(
     logger.warning("GRID STATE")
     logger.warning(f"ANCHOR:      {fmt_num(gs.anchor_price)}")
     logger.warning(f"LAST_BUY:    {fmt_num(gs.last_buy_price)}")
+    logger.warning(f"LAST_TRIG:   {fmt_num(gs.last_trigger_price)}")
     logger.warning(f"BUYS_IN_GRP: {gs.buy_count_in_group}")
     logger.warning(
         f"STEP_NOW:    {fmt_num(step_now)}  (start={cfg.grid_step_start_usd} "
@@ -381,6 +382,7 @@ def main():
         anchor_price=state.get("grid_anchor_price"),
         last_buy_price=state.get("grid_last_buy_price") or state.get("grid_last_trigger"),  # legacy fallback
         buy_count_in_group=int(state.get("grid_buy_count_in_group", 0) or state.get("grid_tier_buys_used", 0) or 0),
+        last_trigger_price=state.get("grid_last_trigger_price") or state.get("grid_last_buy_price"),
     )
 
     logger.warning("")
@@ -670,6 +672,7 @@ def main():
             state["grid_anchor_price"] = gs.anchor_price
             state["grid_last_buy_price"] = gs.last_buy_price
             state["grid_buy_count_in_group"] = int(gs.buy_count_in_group)
+            state["grid_last_trigger_price"] = gs.last_trigger_price
 
             # Clear old keys (keeps state clean)
             state.pop("grid_in_group", None)
