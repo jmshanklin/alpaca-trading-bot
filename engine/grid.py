@@ -29,7 +29,7 @@ def current_step_usd(*, step_start: float, step_increment: float, tier_size: int
 
 def should_buy_now(*, price: float, gs: GridState, step_start: float, step_increment: float, tier_size: int) -> bool:
     # First buy: always allowed (caller still applies risk + time window)
-    if gs.last_buy_price is None:
+    if gs.last_trigger_price is None:
         return True
 
     step = current_step_usd(
@@ -38,13 +38,36 @@ def should_buy_now(*, price: float, gs: GridState, step_start: float, step_incre
         tier_size=tier_size,
         buy_count_in_group=gs.buy_count_in_group,
     )
-    # Must be at least "step" BELOW the last buy price
-    return float(price) <= float(gs.last_buy_price) - float(step)
 
-def on_buy_filled(*, fill_price: float, gs: GridState) -> None:
+    # Must be at least "step" BELOW the last trigger rung
+    return float(price) <= float(gs.last_trigger_price) - float(step)
+
+def on_buy_filled(
+    *,
+    fill_price: float,
+    gs: GridState,
+    step_start: float,
+    step_increment: float,
+    tier_size: int,
+) -> None:
+    fill_price = float(fill_price)
+
+    # First buy sets the anchor and the first trigger rung
     if gs.anchor_price is None:
-        gs.anchor_price = float(fill_price)
-    gs.last_buy_price = float(fill_price)
+        gs.anchor_price = fill_price
+        gs.last_trigger_price = fill_price
+    else:
+        # Advance the trigger rung by exactly one step (engine-matching)
+        step = current_step_usd(
+            step_start=step_start,
+            step_increment=step_increment,
+            tier_size=tier_size,
+            buy_count_in_group=gs.buy_count_in_group,
+        )
+        gs.last_trigger_price = float(gs.last_trigger_price) - float(step)
+
+    # Store actual fill separately (for display/P&L only)
+    gs.last_buy_price = fill_price
     gs.buy_count_in_group += 1
 
 def should_sell_now(*, price: float, gs: GridState, sell_rise_usd: float) -> bool:
