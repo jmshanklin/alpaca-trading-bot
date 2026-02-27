@@ -2,7 +2,6 @@
 from dataclasses import dataclass
 from typing import Optional
 
-
 @dataclass
 class GridState:
     """
@@ -16,7 +15,6 @@ class GridState:
     last_buy_price: Optional[float] = None
     last_trigger_price: Optional[float] = None
     buy_count_in_group: int = 0
-
 
 def current_step_usd(
     *,
@@ -41,7 +39,6 @@ def current_step_usd(
     tier_index = count // tier_size_i
     return float(step_start) + float(step_increment) * float(tier_index)
 
-
 def next_trigger_price(
     *,
     gs: GridState,
@@ -64,7 +61,6 @@ def next_trigger_price(
         buy_count_in_group=gs.buy_count_in_group,
     )
     return float(gs.last_trigger_price) - float(step)
-
 
 def should_buy_now(
     *,
@@ -98,7 +94,6 @@ def should_buy_now(
         return True
 
     return p <= float(nxt)
-
 
 def on_buy_filled(
     *,
@@ -140,7 +135,6 @@ def on_buy_filled(
     gs.last_buy_price = fp
     gs.buy_count_in_group = int(gs.buy_count_in_group) + 1
 
-
 def should_sell_now(*, price: float, gs: GridState, sell_rise_usd: float) -> bool:
     """
     SELL rule:
@@ -149,7 +143,6 @@ def should_sell_now(*, price: float, gs: GridState, sell_rise_usd: float) -> boo
     if gs.anchor_price is None:
         return False
     return float(price) >= float(gs.anchor_price) + float(sell_rise_usd)
-
 
 def reset_group(gs: GridState) -> None:
     """
