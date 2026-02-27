@@ -549,6 +549,11 @@ def main():
             buys_this_tick = 0
 
             while (not cfg.kill_switch) and buys_this_tick < cfg.max_buys_per_tick:
+                # Tighten loop: refresh price EACH iteration so we don't "overbuy" on a bounce
+                price_now = get_last_price(api, cfg.symbol)
+                if price_now is None:
+                    break
+
                 step_now_dbg = current_step_usd(
                     step_start=cfg.grid_step_start_usd,
                     step_increment=cfg.grid_step_increment_usd,
@@ -556,18 +561,18 @@ def main():
                     buy_count_in_group=gs.buy_count_in_group,
                 )
                 next_buy_dbg = (
-                    (float(gs.last_trigger_price) - float(step_now_dbg))
+                    (gs.last_trigger_price - step_now_dbg)
                     if gs.last_trigger_price is not None
                     else None
                 )
                 logger.info(
-                    f"BUY_CHECK price={price:.2f} last_trig={gs.last_trigger_price} last_buy={gs.last_buy_price} "
+                    f"BUY_CHECK price={price_now:.2f} last_trig={gs.last_trigger_price} "
                     f"step={step_now_dbg:.2f} next_buy={next_buy_dbg}"
                 )
 
-                # Grid gate (grid.py should be trigger-based now)
+                # Grid gate (based on TRIGGER ladder, not fills)
                 if not should_buy_now(
-                    price=price,
+                    price=price_now,
                     gs=gs,
                     step_start=cfg.grid_step_start_usd,
                     step_increment=cfg.grid_step_increment_usd,
@@ -583,7 +588,7 @@ def main():
                     buys_today=buys_today,
                     max_buys_per_day=cfg.max_buys_per_day,
                     order_qty=cfg.order_qty,
-                    est_price=price,
+                    est_price=price_now,
                     max_dollars_per_buy=cfg.max_dollars_per_buy,
                     current_pos_qty=max(0, int(pos_qty)),
                     max_position_qty=cfg.max_position_qty,
@@ -599,7 +604,7 @@ def main():
                         symbol=cfg.symbol,
                         side="BUY",
                         qty=int(cfg.order_qty),
-                        est_price=price,
+                        est_price=price_now,
                         is_dry_run=bool(cfg.dry_run),
                         is_leader=bool(is_leader),
                         group_id=group_id,
@@ -615,6 +620,7 @@ def main():
                     logger.warning("STANDBY_BLOCK: skipping BUY (no leader lock)")
                     break
 
+                # Commit one rung buy
                 step_now = current_step_usd(
                     step_start=cfg.grid_step_start_usd,
                     step_increment=cfg.grid_step_increment_usd,
@@ -629,7 +635,7 @@ def main():
                 client_order_id = f"grid-buy-{cfg.symbol}-{uuid.uuid4().hex[:10]}"
 
                 logger.info(
-                    f"GRID_BUY #{buy_count_total} price={price:.2f} qty={cfg.order_qty} "
+                    f"GRID_BUY #{buy_count_total} price={price_now:.2f} qty={cfg.order_qty} "
                     f"step_now={step_now:.2f} buys_in_group={gs.buy_count_in_group} "
                     f"client_order_id={client_order_id}"
                 )
@@ -640,7 +646,7 @@ def main():
                         symbol=cfg.symbol,
                         side="BUY",
                         qty=int(cfg.order_qty),
-                        est_price=price,
+                        est_price=price_now,
                         is_dry_run=True,
                         is_leader=is_leader,
                         group_id=group_id,
@@ -649,13 +655,6 @@ def main():
                         client_order_id=client_order_id,
                         note="DRY_RUN buy",
                     )
-                    on_buy_filled(
-                        fill_price=price,
-                        gs=gs,
-                        step_start=cfg.grid_step_start_usd,
-                        step_increment=cfg.grid_step_increment_usd,
-                        tier_size=cfg.grid_tier_size,
-                    )
                 else:
                     order = submit_market_buy(api, cfg.symbol, cfg.order_qty, client_order_id=client_order_id)
                     journal_trade(
@@ -663,7 +662,7 @@ def main():
                         symbol=cfg.symbol,
                         side="BUY",
                         qty=int(cfg.order_qty),
-                        est_price=price,
+                        est_price=price_now,
                         is_dry_run=False,
                         is_leader=is_leader,
                         group_id=group_id,
@@ -672,14 +671,19 @@ def main():
                         client_order_id=client_order_id,
                         note="ORDER_SUBMITTED buy",
                     )
-                    on_buy_filled(
-                        fill_price=price,
-                        gs=gs,
-                        step_start=cfg.grid_step_start_usd,
-                        step_increment=cfg.grid_step_increment_usd,
-                        tier_size=cfg.grid_tier_size,
-                    )
 
+                # IMPORTANT: advance the TRIGGER ladder by 1 rung (not based on fill)
+                on_buy_filled(
+                    fill_price=price_now,
+                    gs=gs,
+                    step_start=cfg.grid_step_start_usd,
+                    step_increment=cfg.grid_step_increment_usd,
+                    tier_size=cfg.grid_tier_size,
+                )
+
+                # Keep local position estimate moving so risk checks aren't stale
+                pos_qty = int(pos_qty) + int(cfg.order_qty)
+                
             # --- Persist state ---
             state["buy_count_total"] = int(buy_count_total)
             state["buys_today_et"] = int(buys_today)
