@@ -545,32 +545,35 @@ def main():
                     group_id = str(uuid.uuid4())
                     state["group_id"] = group_id
 
-            # --- BUY logic ---
+            # --- BUY logic (catch-up rungs; trigger-based ladder) ---
             buys_this_tick = 0
 
             while (not cfg.kill_switch) and buys_this_tick < cfg.max_buys_per_tick:
-                # Tighten loop: refresh price EACH iteration so we don't "overbuy" on a bounce
+                # Refresh price EACH iteration (prevents overbuy if it bounces)
                 price_now = get_last_price(api, cfg.symbol)
                 if price_now is None:
                     break
 
-                step_now_dbg = current_step_usd(
+                # Compute current step and the next trigger rung we are aiming for
+                step_now = current_step_usd(
                     step_start=cfg.grid_step_start_usd,
                     step_increment=cfg.grid_step_increment_usd,
                     tier_size=cfg.grid_tier_size,
                     buy_count_in_group=gs.buy_count_in_group,
                 )
-                next_buy_dbg = (
-                    (gs.last_trigger_price - step_now_dbg)
+
+                next_trigger = (
+                    (float(gs.last_trigger_price) - float(step_now))
                     if gs.last_trigger_price is not None
                     else None
                 )
+
                 logger.info(
                     f"BUY_CHECK price={price_now:.2f} last_trig={gs.last_trigger_price} "
-                    f"step={step_now_dbg:.2f} next_buy={next_buy_dbg}"
+                    f"step={step_now:.2f} next_buy={next_trigger}"
                 )
 
-                # Grid gate (based on TRIGGER ladder, not fills)
+                # Grid gate (trigger ladder, not fills)
                 if not should_buy_now(
                     price=price_now,
                     gs=gs,
@@ -580,7 +583,7 @@ def main():
                 ):
                     break
 
-                # Risk gate
+                # Risk gate (uses current price estimate)
                 decision = check_buy_allowed(
                     kill_switch=cfg.kill_switch,
                     buys_this_tick=buys_this_tick,
@@ -620,14 +623,7 @@ def main():
                     logger.warning("STANDBY_BLOCK: skipping BUY (no leader lock)")
                     break
 
-                # Commit one rung buy
-                step_now = current_step_usd(
-                    step_start=cfg.grid_step_start_usd,
-                    step_increment=cfg.grid_step_increment_usd,
-                    tier_size=cfg.grid_tier_size,
-                    buy_count_in_group=gs.buy_count_in_group,
-                )
-
+                # ---- Execute one rung buy ----
                 buy_count_total += 1
                 buys_today += 1
                 buys_this_tick += 1
@@ -672,7 +668,7 @@ def main():
                         note="ORDER_SUBMITTED buy",
                     )
 
-                # IMPORTANT: advance the TRIGGER ladder by 1 rung (not based on fill)
+                # Advance the trigger ladder by exactly one rung (not based on fill quality)
                 on_buy_filled(
                     fill_price=price_now,
                     gs=gs,
