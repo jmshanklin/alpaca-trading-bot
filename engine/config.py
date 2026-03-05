@@ -6,7 +6,6 @@ from typing import Optional, Tuple
 
 _NUM_RE = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)")
 
-
 def env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or str(raw).strip() == "":
@@ -15,7 +14,6 @@ def env_float(name: str, default: float) -> float:
     if not m:
         raise ValueError(f"Env {name} must start with a number. Got: {raw!r}")
     return float(m.group(1))
-
 
 def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -26,17 +24,14 @@ def env_int(name: str, default: int) -> int:
         raise ValueError(f"Env {name} must start with a number. Got: {raw!r}")
     return int(float(m.group(1)))
 
-
 def env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
     return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
 
-
 def env_str(name: str, default: str = "") -> str:
     return (os.getenv(name, default) or "").strip()
-
 
 def parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
     try:
@@ -46,7 +41,6 @@ def parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
         return int(hh), int(mm)
     except Exception:
         return None
-
 
 @dataclass(frozen=True)
 class Config:
@@ -94,7 +88,6 @@ class Config:
 
     # Logging / banners
     log_position_changes: bool
-
 
 def load_config() -> Config:
     # allow either APCA_* or ALPACA_* key names
