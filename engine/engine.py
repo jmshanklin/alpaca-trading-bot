@@ -505,7 +505,13 @@ def main():
                     f"target_profit_usd={target_profit_usd:.2f}"
                 )
 
-            if pos_qty > 0 and unrealized_profit_est is not None and unrealized_profit_est >= target_profit_usd:
+            # Safety: only allow sell if qty is valid
+            sell_qty_valid = True
+            if pos_qty is None or int(pos_qty) <= 0:
+                logger.info(f"SELL_ABORT invalid_position_qty pos_qty={pos_qty}")
+                sell_qty_valid = False
+
+            if sell_qty_valid and pos_qty > 0 and unrealized_profit_est is not None and unrealized_profit_est >= target_profit_usd:
                 # Belt-and-suspenders: only meaningful when DB/leader mode is enabled
                 if (not cfg.dry_run) and (conn is not None) and (not is_leader):
                     logger.warning("STANDBY_BLOCK: skipping SELL (no leader lock)")
