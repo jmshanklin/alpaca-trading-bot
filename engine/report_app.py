@@ -1010,35 +1010,40 @@ def report():
                 elif tsla_price is not None:
                     current_price = float(tsla_price)
 
-                # Strategy settings (match engine defaults unless you later move these to env vars)
+                # Strategy settings
                 BUY_QTY = 12
-                SELL_OFFSET = 2.0
+                TARGET_PROFIT_USD = 500.0
 
                 # Engine grid math knobs (must match engine/config.py)
                 TIER_SIZE = 5
                 STEP_START = 1.0
                 STEP_INCREMENT = 1.0
 
-                buys_count = len(buys)  # bot buys in this group (same meaning as gs.buy_count_in_group)
+                buys_count = len(buys)  # bot buys in this group
 
                 # --- Engine-equivalent step_now ---
-                # When buys_count = 0..4 -> 1.00
-                # When buys_count = 5..9 -> 2.00
-                # etc.
                 step_now = float(STEP_START + STEP_INCREMENT * (buys_count // TIER_SIZE))
 
-                # Last bot trigger price from the journal (this matches what engine used when it decided to buy)
+                # Last bot trigger price from the journal
                 last_trigger_price = None
                 if buys and buys[-1].get("est_price") is not None:
                     last_trigger_price = float(buys[-1]["est_price"])
 
                 # --- Engine-equivalent next buy trigger ---
-                # Engine triggers off the last buy price, NOT the original anchor.
                 next_buy_price_engine = (
                     (last_trigger_price - step_now) if last_trigger_price is not None else None
                 )
 
-                sell_target = (anchor_price + SELL_OFFSET) if anchor_price is not None else None
+                # Current position values
+                qty_now = float(position_data.get("qty") or 0) if position_data else 0.0
+                avg_entry_now = float(position_data.get("avg_entry") or 0) if position_data else 0.0
+
+                # New sell target based on flat dollar profit target
+                sell_target = None
+                target_profit_per_share = None
+                if qty_now > 0 and avg_entry_now > 0:
+                    target_profit_per_share = TARGET_PROFIT_USD / qty_now
+                    sell_target = avg_entry_now + target_profit_per_share
 
                 distance_to_sell = None
                 distance_to_next_buy_engine = None
@@ -1047,13 +1052,14 @@ def report():
                 if current_price is not None and next_buy_price_engine is not None:
                     distance_to_next_buy_engine = round(current_price - next_buy_price_engine, 4)
 
-                # Optional: show "buys_in_this_increment" (handy for UI/debug; matches engine idea)
                 buys_in_this_increment = (buys_count % TIER_SIZE) if buys_count is not None else None
 
                 active_group = {
                     "group_start_time": fmt_ct_any(group_start_time),
                     "anchor_vwap": round(anchor_price, 4) if anchor_price is not None else None,
                     "sell_target": round(sell_target, 4) if sell_target is not None else None,
+                    "target_profit_usd": round(TARGET_PROFIT_USD, 2),
+                    "target_profit_per_share": round(target_profit_per_share, 4) if target_profit_per_share is not None else None,
                     "buys_count": buys_count,
                     "drop_increment": step_now,
                     "buys_in_this_increment": buys_in_this_increment,
@@ -1066,7 +1072,7 @@ def report():
                     "buy_qty": BUY_QTY,
                     "group_id": group_id,
                 }
-
+                
             data["active_group"] = active_group
             data["active_group_triggers"] = active_group_triggers
             data["active_group_last_sell_time"] = last_bot_sell_ts.isoformat() if last_bot_sell_ts else None
@@ -1156,7 +1162,7 @@ def table_view():
 
     # Potential profit
     html.append("<div class='metric-wrap'><div class='box metric-box'>")
-    html.append("<div class='metric-title'>Potential Profit (to Sell Target)</div>")
+    html.append("<div class='metric-title'>Profit Target</div>")
     html.append("<div class='metric-value'>$<span id='potential-profit'></span></div>")
     html.append("<div class='metric-sub'>Per share: $<span id='potential-per-share'></span></div>")
     html.append("</div></div>")
@@ -1312,16 +1318,18 @@ def table_view():
         }
 
         const sellTarget = num(ag.sell_target);
-        const avgEntry = num(pos.avg_entry);
-        const qty = num(pos.qty);
+        const perShareTarget = num(ag.target_profit_per_share);
+        const totalProfitTarget = num(ag.target_profit_usd);
 
         let perShare = "";
         let total = "";
-        if (sellTarget != null && avgEntry != null && qty != null) {
-          const ps = (sellTarget - avgEntry);
-          perShare = fmtMoney(ps);
-          total = fmtMoney(ps * qty);
+        if (perShareTarget != null) {
+          perShare = fmtMoney(perShareTarget);
         }
+        if (totalProfitTarget != null) {
+          total = fmtMoney(totalProfitTarget);
+        }
+
         setText("potential-per-share", perShare);
         setText("potential-profit", total);
 
