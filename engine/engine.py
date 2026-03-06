@@ -492,7 +492,20 @@ def main():
                 continue
 
             # --- SELL logic ---
-            if pos_qty > 0 and should_sell_now(price=price, gs=gs, sell_rise_usd=cfg.sell_rise_usd):
+            target_profit_usd = 500.0  # <-- change this later if you want (ex: 300, 400, 600)
+
+            unrealized_profit_est = None
+            if pos_qty > 0 and avg_entry is not None:
+                unrealized_profit_est = (float(price) - float(avg_entry)) * int(pos_qty)
+
+            if pos_qty > 0 and unrealized_profit_est is not None:
+                logger.info(
+                    f"SELL_CHECK price={price:.2f} avg_entry={avg_entry:.2f} "
+                    f"pos_qty={int(pos_qty)} unrealized_profit_est={unrealized_profit_est:.2f} "
+                    f"target_profit_usd={target_profit_usd:.2f}"
+                )
+
+            if pos_qty > 0 and unrealized_profit_est is not None and unrealized_profit_est >= target_profit_usd:
                 # Belt-and-suspenders: only meaningful when DB/leader mode is enabled
                 if (not cfg.dry_run) and (conn is not None) and (not is_leader):
                     logger.warning("STANDBY_BLOCK: skipping SELL (no leader lock)")
@@ -501,7 +514,9 @@ def main():
                     client_order_id = f"grid-sell-{cfg.symbol}-{uuid.uuid4().hex[:10]}"
 
                     logger.warning(
-                        f"SELL_SIGNAL price={price:.2f} anchor={gs.anchor_price} qty={sell_qty} "
+                        f"SELL_SIGNAL price={price:.2f} avg_entry={avg_entry:.2f} qty={sell_qty} "
+                        f"unrealized_profit_est={unrealized_profit_est:.2f} "
+                        f"target_profit_usd={target_profit_usd:.2f} "
                         f"client_order_id={client_order_id}"
                     )
 
@@ -518,7 +533,7 @@ def main():
                             gs=gs,
                             order_id=None,
                             client_order_id=client_order_id,
-                            note="DRY_RUN sell",
+                            note=f"DRY_RUN sell (profit target hit: est={unrealized_profit_est:.2f}, target={target_profit_usd:.2f})",
                         )
                         reset_group(gs)
                         pos_qty = 0
@@ -536,7 +551,7 @@ def main():
                             gs=gs,
                             order_id=getattr(order, "id", None),
                             client_order_id=client_order_id,
-                            note="ORDER_SUBMITTED sell",
+                            note=f"ORDER_SUBMITTED sell (profit target hit: est={unrealized_profit_est:.2f}, target={target_profit_usd:.2f})",
                         )
                         reset_group(gs)
                         pos_qty = 0
@@ -544,7 +559,7 @@ def main():
                     # New group after a full exit
                     group_id = str(uuid.uuid4())
                     state["group_id"] = group_id
-
+                    
             # --- BUY logic (catch-up rungs; trigger-based ladder) ---
             buys_this_tick = 0
 
